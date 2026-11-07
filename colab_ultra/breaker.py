@@ -902,6 +902,17 @@ def cmd_init(args):
     except Exception as e:
         console.print(f"[yellow]⚠️ 官方 CLI 补丁检查提示: {e}[/yellow]")
 
+    # Ensure Agent SKILL.md symlinks are installed for Codex / Antigravity / Agents
+    for skill_dir in ("~/.codex/skills", "~/.gemini/config/skills", "~/.agents/skills"):
+        parent = os.path.expanduser(skill_dir)
+        if os.path.isdir(parent):
+            link_path = os.path.join(parent, "colab-ultra")
+            if not os.path.exists(link_path):
+                try:
+                    os.symlink(BASE_DIR, link_path)
+                except Exception:
+                    pass
+
     adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
     scopes_needed = (
         "openid,"
