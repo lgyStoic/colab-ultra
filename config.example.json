@@ -1,0 +1,16 @@
+{
+  "poll_interval_sec": 15,
+  "gpu_min_util_pct": 5.0,
+  "cpu_min_util_pct": 55.0,
+  "alert_after_minutes": 5.0,
+  "stop_after_minutes": 10.0,
+  "enable_macos_notification": true,
+  "enable_voice_alert": true,
+  "webhook_url": "",
+  "auto_backup_to_drive_before_stop": true,
+  "drive_hub_root": "/content/drive/MyDrive/ColabUltra",
+  "vps_host": "",
+  "vps_ssh_key": "~/.ssh/id_ed25519",
+  "vps_remote_stats_path": "/tmp/colab_stats.json",
+  "local_stats_out": ""
+}

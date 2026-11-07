@@ -1,0 +1,29 @@
+# Local runtime configuration & secrets (stored in ~/.config/colab-ultra/config.json)
+breaker_config.json
+config.json
+*credentials*.json
+*adc*.json
+*token*.json
+*.pem
+*.key
+.env
+.env.*
+
+# Logs & runtime telemetry
+logs/
+*.log
+*.jsonl
+*stats.json
+.colab_telemetry.json
+
+# macOS / NAS AppleDouble & Python cache
+._*
+.DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
