@@ -1,6 +1,6 @@
 # ⚡ Colab Ultra (`colab-ultra`)
 
-**Agent-First Google Colab GPU 算力中枢 × 显卡物理瓦数智能电闸 × 20TB 云盘永久工作区**
+**Agent-First Google Colab GPU/CPU 算力中枢 × 显卡物理瓦数智能电闸 × 20TB/30TB 云盘永久工作区**
 
 ![Colab Ultra 功能全景图](assets/colab-ultra-overview.jpg)
 

@@ -1,6 +1,6 @@
 ---
 name: colab-ultra
-description: Agent-First Google Colab GPU orchestrator with physical GPU wattage (W) smart circuit breaker, automatic 20TB Google Drive workspace persistence, and 24/7 autonomous VPS sentinel protection. Use whenever an AI Agent needs to run GPU compute, LLM inference, or DiT/LoRA training on Google Colab without risking runaway Compute Unit (CCU) billing.
+description: Agent-First Google Colab GPU & Multi-Core CPU orchestrator with physical GPU wattage (W) smart circuit breaker, 8-to-44 vCPU / 5-node CPU cluster scheduling, automatic 20TB/30TB Google Drive workspace persistence, and 24/7 autonomous VPS sentinel protection. Use whenever an AI Agent needs to run GPU compute, pure-CPU data preprocessing/ETL, LLM inference, or DiT/LoRA training on Google Colab without risking runaway Compute Unit (CCU) billing.
 ---
 
 # Colab Ultra — Agent-First GPU Orchestrator & Smart Wattage Breaker
