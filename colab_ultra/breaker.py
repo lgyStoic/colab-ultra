@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -58,6 +59,7 @@ DEFAULT_CONFIG = {
     "poll_interval_sec": 15,
     "gpu_min_util_pct": 5.0,
     "cpu_min_util_pct": 55.0,
+    "cpu_only_min_util_pct": 8.0,
     "alert_after_minutes": 5.0,
     "stop_after_minutes": 10.0,
     "enable_macos_notification": True,
@@ -165,7 +167,9 @@ def backup_vm_outputs_to_drive(proxy_url: str, proxy_token: str):
 
 
 def start_remote_probe_via_runtime(proxy_url: str, proxy_token: str):
-    rt = ColabRuntime(proxy_url, proxy_token)
+    kernels = fetch_vm_kernels(proxy_url, proxy_token)
+    kid = kernels[0].get("id") if kernels else None
+    rt = ColabRuntime(proxy_url, proxy_token, kernel_id=kid)
     try:
         boot_code = (
             "import subprocess\n"
@@ -183,23 +187,30 @@ def upload_file_to_vm(proxy_url: str, proxy_token: str, local_path: str, remote_
         b64_content = base64.b64encode(f.read()).decode("ascii")
     url = f"{proxy_url.rstrip('/')}/api/contents/{remote_path.lstrip('/')}"
     params = {"authuser": "0", "colab-runtime-proxy-token": proxy_token}
+    headers = {
+        "Authorization": f"Bearer {proxy_token}",
+        "X-Colab-Runtime-Proxy-Token": proxy_token,
+    }
     payload = {
         "name": os.path.basename(remote_path),
         "path": remote_path.lstrip("/"),
         "type": "file",
         "format": "base64",
         "content": b64_content,
-        "chunk": 1,
     }
-    resp = requests.put(url, params=params, json=payload, timeout=8)
+    resp = requests.put(url, params=params, headers=headers, json=payload, timeout=8)
     resp.raise_for_status()
 
 
 def fetch_vm_kernels(proxy_url: str, proxy_token: str) -> list:
     url = f"{proxy_url.rstrip('/')}/api/kernels"
     params = {"authuser": "0", "colab-runtime-proxy-token": proxy_token}
+    headers = {
+        "Authorization": f"Bearer {proxy_token}",
+        "X-Colab-Runtime-Proxy-Token": proxy_token,
+    }
     try:
-        resp = requests.get(url, params=params, timeout=5)
+        resp = requests.get(url, params=params, headers=headers, timeout=5)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -211,10 +222,14 @@ def fetch_vm_telemetry(proxy_url: str, proxy_token: str, auto_deploy: bool = Tru
     """Fetch /content/.colab_telemetry.json from the VM; deploy probe if missing or stale."""
     url = f"{proxy_url.rstrip('/')}/api/contents/content/.colab_telemetry.json"
     params = {"content": "1", "authuser": "0", "colab-runtime-proxy-token": proxy_token}
+    headers = {
+        "Authorization": f"Bearer {proxy_token}",
+        "X-Colab-Runtime-Proxy-Token": proxy_token,
+    }
 
     def _read():
         try:
-            r = requests.get(url, params=params, timeout=5)
+            r = requests.get(url, params=params, headers=headers, timeout=5)
             if r.status_code == 200:
                 body = r.json()
                 content = body.get("content", "")
@@ -312,6 +327,7 @@ def sync_dashboard_json(ccu, vms, idle_tracker: dict = None, cfg: dict = None):
             "power_draw_w": round(float(gpu.get("power_draw_w", 0.0)), 1) if gpu.get("available") else 0.0,
             "power_limit_w": round(float(gpu.get("power_limit_w", 0.0)), 1) if gpu.get("available") else 0.0,
             "temp_c": round(float(gpu.get("temp_c", 0.0)), 0) if gpu.get("available") else 0.0,
+            "cpu_cores": int(sys_info.get("cpu_cores", 0) or 0),
             "cpu_util_pct": round(float(sys_info.get("cpu_util_est_pct", 0.0)), 1),
             "ram_used_gb": round(float(sys_info.get("ram_used_gb", 0.0)), 1),
             "ram_total_gb": round(float(sys_info.get("ram_total_gb", 0.0)), 1),
@@ -424,10 +440,12 @@ def render_dashboard(ccu, vms, idle_tracker: dict = None):
             vram_str = "[dim]N/A[/dim]"
             pwr_str = "[dim]N/A[/dim]"
 
+        cpu_cores = sys_info.get("cpu_cores", 0)
         cpu_pct = sys_info.get("cpu_util_est_pct", 0.0)
         ram_u = sys_info.get("ram_used_gb", 0.0)
         ram_t = sys_info.get("ram_total_gb", 0.0)
-        cpu_str = f"{cpu_pct:.0f}% | {ram_u:.1f}/{ram_t:.0f}G"
+        core_prefix = f"{cpu_cores}核 " if cpu_cores else ""
+        cpu_str = f"{core_prefix}{cpu_pct:.0f}% | {ram_u:.1f}/{ram_t:.0f}G"
 
         if drive.get("mounted"):
             free_tb = drive.get("free_tb", 0.0)
@@ -445,9 +463,10 @@ def render_dashboard(ccu, vms, idle_tracker: dict = None):
         if hb and hb.get("age_seconds", 999) < 60:
             status_str += f"\n[dim]📌 {hb.get('task', '')}: {hb.get('status', '')}[/dim]"
 
+        acc_label = "CPU" if vm["accelerator"] in ("NONE", "CPU") else vm["accelerator"]
         table.add_row(
             f"{vm['name']}\n[dim]{vm['endpoint'][:18]}..[/dim]",
-            f"{vm['accelerator']}\n[dim]{vm['shape']}[/dim]",
+            f"{acc_label}\n[dim]{vm['shape']}[/dim]",
             gpu_util_str,
             vram_str,
             pwr_str,
@@ -469,13 +488,32 @@ def evaluate_vm_load(vm: dict, cfg: dict) -> tuple[bool, str]:
     sys_info = t.get("system", {})
     hb = t.get("task_heartbeat")
 
-    gpu_util = gpu.get("gpu_util_pct", 0.0) if gpu.get("available") else 0.0
-    vram_used_gb = (gpu.get("vram_used_mib", 0.0) / 1024.0) if gpu.get("available") else 0.0
-    power_w = gpu.get("power_draw_w", 0.0) if gpu.get("available") else 0.0
-    power_lim = gpu.get("power_limit_w", 0.0) if gpu.get("available") else 0.0
+    gpu_avail = bool(gpu.get("available"))
+    gpu_util = gpu.get("gpu_util_pct", 0.0) if gpu_avail else 0.0
+    vram_used_gb = (gpu.get("vram_used_mib", 0.0) / 1024.0) if gpu_avail else 0.0
+    power_w = gpu.get("power_draw_w", 0.0) if gpu_avail else 0.0
+    power_lim = gpu.get("power_limit_w", 0.0) if gpu_avail else 0.0
+    cpu_cores = sys_info.get("cpu_cores", 0) or 2
     cpu_util = sys_info.get("cpu_util_est_pct", 0.0)
+    load_1m = sys_info.get("load_1m", 0.0)
+    ram_used_gb = sys_info.get("ram_used_gb", 0.0)
+    ram_total_gb = sys_info.get("ram_total_gb", 0.0)
     k_state = vm.get("kernel_state", "idle")
 
+    # Fresh custom task heartbeat (< 30s) always counts as active
+    if hb and hb.get("age_seconds", 999) < 30 and hb.get("active", True):
+        return False, f"任务心跳活跃 ({hb.get('task', 'job')})"
+
+    # Branch A: CPU-Only or TPU-Host Data Processing Node (No NVIDIA GPU present)
+    if not gpu_avail or vm.get("accelerator") in ("NONE", "CPU"):
+        cpu_only_min = float(cfg.get("cpu_only_min_util_pct", 8.0))
+        if cpu_util >= cpu_only_min or load_1m >= 0.4:
+            return False, f"CPU 数据处理活跃 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used_gb:.1f}/{ram_total_gb:.0f}GB)"
+        if k_state == "busy":
+            return False, f"CPU 内核忙碌执行中 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used_gb:.1f}/{ram_total_gb:.0f}GB)"
+        return True, f"CPU 节点空载待机 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used_gb:.1f}/{ram_total_gb:.0f}GB, 内核 IDLE)"
+
+    # Branch B: GPU Node — verified by physical power draw (Watts)
     min_active_watts = 75.0 if power_lim >= 250.0 else 28.0
     power_is_active = (power_w >= min_active_watts) if power_w > 0 else False
     power_is_dead_idle = (power_w > 0 and power_w < min_active_watts)
@@ -486,15 +524,11 @@ def evaluate_vm_load(vm: dict, cfg: dict) -> tuple[bool, str]:
     if not power_is_dead_idle and gpu_util >= cfg["gpu_min_util_pct"]:
         return False, f"GPU 活跃计算中 ({gpu_util:.1f}%)"
 
-    # 2. Active CPU / Disk I/O only when kernel is BUSY and CPU >= 55%
-    if k_state == "busy" and cpu_util >= 55.0:
+    # 2. Active CPU / Disk I/O on a GPU node when kernel is BUSY and CPU >= 55%
+    if k_state == "busy" and cpu_util >= cfg.get("cpu_min_util_pct", 55.0):
         return False, f"CPU/云盘读写活跃 (CPU {cpu_util:.1f}%, GPU {power_w:.0f}W)"
 
-    # 3. Fresh custom task heartbeat (< 30s)
-    if hb and hb.get("age_seconds", 999) < 30 and hb.get("active", True):
-        return False, f"任务心跳活跃 ({hb.get('task', 'job')})"
-
-    # 4. Otherwise, it IS in a low-load / idle wattage state! Classify why:
+    # 3. Otherwise, the GPU node IS in a low-load / idle wattage state! Classify why:
     if power_is_dead_idle and gpu_util >= 20.0:
         return True, f"疑似通信死锁假忙 (GPU显示{gpu_util:.0f}% 但真实功耗仅 {power_w:.0f}W < {min_active_watts:.0f}W)"
     elif vram_used_gb >= 3.0 and k_state == "busy":
@@ -648,6 +682,7 @@ def build_agent_status_payload(ccu, vms, cfg: dict = None) -> dict:
             "vram_used_mib": gpu.get("vram_used_mib", 0.0),
             "vram_total_mib": gpu.get("vram_total_mib", 0.0),
             "temp_c": gpu.get("temp_c", 0.0),
+            "cpu_cores": int(sys_info.get("cpu_cores", 0) or 0),
             "cpu_util_pct": sys_info.get("cpu_util_est_pct", 0.0),
             "ram_used_gb": sys_info.get("ram_used_gb", 0.0),
             "ram_total_gb": sys_info.get("ram_total_gb", 0.0),
@@ -667,74 +702,116 @@ def build_agent_status_payload(ccu, vms, cfg: dict = None) -> dict:
     }
 
 
-def cmd_up(args):
-    """Spin up a Colab session, deploy telemetry probe, and upload Drive Hub initializer."""
-    colab_bin = resolve_colab_bin()
-    gpu_choice = (args.gpu or "T4").upper()
-    cmd = [colab_bin, "new", "-s", args.session]
-    if gpu_choice not in ("CPU", "NONE", "OFF"):
+def _spin_up_single_session(colab_bin: str, session_name: str, args):
+    """Create a single Colab session, mount Drive, and initialize workspace."""
+    tpu_choice = (getattr(args, "tpu", None) or "").strip().lower()
+    if getattr(args, "cpu", False):
+        gpu_choice = "CPU"
+    else:
+        gpu_choice = (args.gpu or "T4").upper()
+
+    is_cpu = (gpu_choice in ("CPU", "NONE", "OFF")) and not tpu_choice
+    # For CPU data processing, default to 8-vCPU / 50GiB High-RAM (0.26 CU/h) unless --std-mem is requested
+    use_high_mem = bool(args.high_mem or (is_cpu and not getattr(args, "std_mem", False)))
+
+    cmd = [colab_bin, "new", "-s", session_name]
+    if tpu_choice:
+        cmd.extend(["--tpu", tpu_choice])
+        hw_label = f"TPU-{tpu_choice.upper()} (超高核CPU宿主机)"
+    elif not is_cpu:
         cmd.extend(["--gpu", gpu_choice])
-    if args.high_mem:
+        hw_label = f"{gpu_choice}{' High-RAM' if use_high_mem else ''}"
+    else:
+        hw_label = "CPU High-RAM (8核 50GB, 0.26 CU/h)" if use_high_mem else "CPU Standard (2核 12GB, 0.08 CU/h)"
+
+    if use_high_mem and not tpu_choice:
         cmd.append("--high-mem")
+
     if not getattr(args, "json", False):
-        console.print(f"⚡ [bold cyan]正在合闸启动 Colab {gpu_choice} 实例 ({args.session})...[/bold cyan]")
+        console.print(f"⚡ [bold cyan]正在合闸启动 Colab {hw_label} 实例 ({session_name})...[/bold cyan]")
     subprocess.check_call(
         cmd,
         stdout=subprocess.DEVNULL if getattr(args, "json", False) else None,
         stderr=subprocess.DEVNULL if getattr(args, "json", False) else None,
     )
 
-    # Auto-mount 20TB Google Drive and run init_20tb_drive.py by default
     if not getattr(args, "no_drive", False):
         if not getattr(args, "json", False):
-            console.print(f"📦 [cyan]正在默认自动挂载 20TB Google Drive 并初始化永久工作区 ({args.session})...[/cyan]")
+            console.print(f"📦 [cyan]正在默认自动挂载 20TB Google Drive 并初始化永久工作区 ({session_name})...[/cyan]")
         try:
             subprocess.call(
-                [colab_bin, "drivemount", "-s", args.session],
+                [colab_bin, "drivemount", "-s", session_name],
                 stdout=subprocess.DEVNULL if getattr(args, "json", False) else None,
             )
             init_script = os.path.join(BASE_DIR, "workflows", "init_20tb_drive.py")
             if os.path.exists(init_script):
                 subprocess.call(
-                    [colab_bin, "exec", "-s", args.session, "-f", init_script],
-                    stdout=subprocess.DEVNULL if getattr(args, "json", False) else None,
-                )
-                subprocess.call(
-                    [colab_bin, "exec", "-s", args.session, "python3 /content/.colab_probe.py --once"],
+                    [colab_bin, "exec", "-s", session_name, "-f", init_script],
                     stdout=subprocess.DEVNULL if getattr(args, "json", False) else None,
                 )
         except Exception as e:
             if not getattr(args, "json", False):
-                console.print(f"[yellow]⚠️ 自动挂载云盘遇到提示: {e}[/yellow]")
+                console.print(f"[yellow]⚠️ 自动挂载云盘遇到提示 ({session_name}): {e}[/yellow]")
+
+
+def cmd_up(args):
+    """Spin up one or more Colab sessions (GPU, 8-core High-RAM CPU, or 44-core TPU host), deploy probe, and mount Drive."""
+    colab_bin = resolve_colab_bin()
+    workers = max(1, int(getattr(args, "workers", 1) or 1))
+    session_names = [args.session] if workers == 1 else [f"{args.session}-{i}" for i in range(1, workers + 1)]
+
+    started_sessions = []
+    for s_name in session_names:
+        try:
+            _spin_up_single_session(colab_bin, s_name, args)
+            started_sessions.append(s_name)
+        except subprocess.CalledProcessError as e:
+            if not getattr(args, "json", False):
+                console.print(f"[yellow]⚠️ 节点 [{s_name}] 启动受限 (已开启 {len(started_sessions)} 台): {e}[/yellow]")
+            break
 
     # Deploy telemetry probe and refresh dashboard
     ccu, vms = inspect_all_vms()
     for vm in vms:
-        if vm["name"] == args.session:
+        if vm["name"] in started_sessions:
             init_script = os.path.join(BASE_DIR, "workflows", "init_20tb_drive.py")
             if os.path.exists(init_script):
                 upload_file_to_vm(vm["proxy_url"], vm["proxy_token"], init_script, "content/init_20tb_drive.py")
     if getattr(args, "json", False):
         sync_dashboard_json(ccu, vms)
-        print(json.dumps(build_agent_status_payload(ccu, vms), indent=2, ensure_ascii=False))
+        payload = build_agent_status_payload(ccu, vms)
+        payload["started_sessions"] = started_sessions
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         render_dashboard(ccu, vms)
-        console.print(f"[green]✅ 实例 [{args.session}] 已就绪（硬件探针 + 20TB 云盘永久工作区已激活）！[/green]")
+        console.print(f"[green]✅ 实例 {started_sessions} 已就绪（硬件探针 + 20TB 云盘永久工作区已激活）！[/green]")
 
 
 def cmd_exec(args):
     """Agent-First remote code/script execution with automatic post-run hardware telemetry."""
     colab_bin = resolve_colab_bin()
-    cmd = [colab_bin, "exec", "-s", args.session]
+    timeout_sec = str(getattr(args, "timeout", 300.0) or 300.0)
+    cmd = [colab_bin, "exec", "-s", args.session, "--timeout", timeout_sec]
+    tmp_script = None
     if args.file:
         cmd.extend(["-f", args.file])
     elif args.code:
-        cmd.append(args.code)
+        fd, tmp_script = tempfile.mkstemp(prefix="colab_ultra_exec_", suffix=".py")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(args.code + "\n")
+        cmd.extend(["-f", tmp_script])
     else:
         raise SystemExit("Provide either inline code or -f <script.py>")
 
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=getattr(args, "json", False), text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=getattr(args, "json", False), text=True)
+    finally:
+        if tmp_script and os.path.exists(tmp_script):
+            try:
+                os.remove(tmp_script)
+            except Exception:
+                pass
     elapsed = round(time.time() - t0, 2)
 
     if getattr(args, "json", False):
@@ -906,17 +983,22 @@ def main():
     p_watch.add_argument("--once", action="store_true", help="仅执行一次巡检与阈值判定后退出")
 
     # up
-    p_up = sub.add_parser("up", help="一键合闸开机、默认挂载 20TB 云盘并注入硬件负载探针")
-    p_up.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra)")
-    p_up.add_argument("--gpu", default="T4", help="硬件型号: T4, L4, A100, H100, CPU (默认 T4，省钱模式)")
-    p_up.add_argument("--high-mem", action="store_true", default=False, help="开启高内存模式 (默认关闭以节省算力点)")
+    p_up = sub.add_parser("up", help="一键合闸开机（支持 GPU / 8核高内存CPU / 44核TPU宿主机 / 多节点并发）、挂载云盘并注入负载探针")
+    p_up.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra；多节点时自动命名为 <session>-1..N)")
+    p_up.add_argument("--gpu", default="T4", help="硬件型号: T4, L4, A100, H100, CPU (默认 T4)")
+    p_up.add_argument("--cpu", action="store_true", default=False, help="启动纯 CPU 数据处理节点 (默认自动开启 8核50GB 高内存模式，仅 0.26 CU/h)")
+    p_up.add_argument("--tpu", default=None, help="启动超高核 TPU 宿主机做大数据处理: v5e1 (24核47GB, 3.09 CU/h) 或 v6e1 (44核172GB, 5.09 CU/h)")
+    p_up.add_argument("--high-mem", action="store_true", default=False, help="开启高内存模式 (--cpu 默认自动开启)")
+    p_up.add_argument("--std-mem", action="store_true", default=False, help="在 --cpu 模式下强制使用标准内存 (2核12GB, 0.08 CU/h)")
+    p_up.add_argument("--workers", type=int, default=1, help="并发拉起多台节点数量 (例如 --cpu --workers 5 可并发拉起 40核250GB 集群)")
     p_up.add_argument("--no-drive", action="store_true", default=False, help="跳过自动挂载 20TB Google Drive")
     p_up.add_argument("--json", action="store_true", help="以结构化 JSON 返回实例就绪与硬件状态 (Agent 专用)")
 
     # exec (Agent-first remote execution + telemetry return)
-    p_exec = sub.add_parser("exec", help="在 Colab 实例中执行代码或脚本，并自动返回最新 GPU 瓦数/显存/云盘状态")
+    p_exec = sub.add_parser("exec", help="在 Colab 实例中执行代码或脚本，并自动返回最新 GPU 瓦数/CPU核数/显存/云盘状态")
     p_exec.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra)")
     p_exec.add_argument("-f", "--file", default=None, help="要上传并执行的本地 Python 脚本路径")
+    p_exec.add_argument("--timeout", type=float, default=300.0, help="远程执行超时秒数 (默认 300s)")
     p_exec.add_argument("code", nargs="?", default=None, help="要直接执行的 Python 代码片段")
     p_exec.add_argument("--json", action="store_true", help="输出包含 stdout/stderr 与实时硬件瓦数的 JSON (Agent 专用)")
 

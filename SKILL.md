@@ -15,11 +15,20 @@ Always use `colab-ultra` (with `--json` for structured Agent parsing) instead of
    ```
    - Inspect `paid_balance`, `burn_rate_hourly`, `active_vms_count`, and each VM's `power_draw_w`, `vram_used_mib`, `drive_mounted`, and `is_low_load`.
 
-2. **Spin Up GPU with Auto-Mounted Google Drive Workspace**:
-   - **Rule of Thumb**: Default to `T4` for environment setup, debugging, or lightweight inference; escalate to `A100` or `H100` only when executing heavy training or benchmark runs.
+2. **Spin Up GPU or Multi-Core CPU with Auto-Mounted Google Drive Workspace**:
+   - **Rule of Thumb**:
+     - For **data preprocessing / ETL / Parquet / downloading**: use `--cpu` (`8 vCPU AMD EPYC + 51 GB RAM` at only `0.26 CU/h`), `--cpu --workers 5` (`40 vCPU + 255 GB RAM` across 5 nodes at `1.30 CU/h`), or `--tpu v6e1` (`44 vCPU AMD EPYC Zen4 + 172 GB RAM` single-node monster at `5.09 CU/h`).
+     - For **GPU environment setup / debugging / lightweight inference**: default to `--gpu T4`.
+     - For **heavy DiT / LoRA training or 80GB VRAM workloads**: escalate to `--gpu A100` or `--gpu H100`.
    ```bash
+   # Pure CPU High-RAM data node (8 vCPU, 51 GB RAM, 0.26 CU/h):
+   colab-ultra up --cpu -s data --json
+   # 5-node parallel CPU cluster (40 vCPU, 255 GB RAM total, shared Google Drive):
+   colab-ultra up --cpu --workers 5 -s data --json
+   # 44-vCPU / 172 GB RAM single-node big-memory host:
+   colab-ultra up --tpu v6e1 -s bigmem --json
+   # GPU nodes:
    colab-ultra up -s ultra --gpu T4 --json
-   # For heavy DiT / LoRA training or 80GB VRAM workloads:
    colab-ultra up -s ultra --gpu A100 --json
    ```
    - This automatically:

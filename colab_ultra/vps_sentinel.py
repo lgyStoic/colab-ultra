@@ -42,6 +42,7 @@ XSSI_PREFIX = ")]}'\n"
 # Smart Breaker thresholds (default: 5 min warning, 10 min auto-trip)
 GPU_MIN_UTIL_PCT = float(_sentinel_cfg.get("gpu_min_util_pct", 5.0))
 CPU_MIN_UTIL_PCT = float(_sentinel_cfg.get("cpu_min_util_pct", 55.0))
+CPU_ONLY_MIN_UTIL_PCT = float(_sentinel_cfg.get("cpu_only_min_util_pct", 8.0))
 ALERT_AFTER_SEC = int(float(_sentinel_cfg.get("alert_after_minutes", 5.0)) * 60)
 STOP_AFTER_SEC = int(float(_sentinel_cfg.get("stop_after_minutes", 10.0)) * 60)
 
@@ -341,7 +342,9 @@ def main():
         power_w = round(float(gpu.get("power_draw_w", pushed_vm.get("power_draw_w", 0.0))), 1) if gpu_avail else 0.0
         power_lim = round(float(gpu.get("power_limit_w", pushed_vm.get("power_limit_w", 0.0))), 1) if gpu_avail else 0.0
         temp_c = round(float(gpu.get("temp_c", pushed_vm.get("temp_c", 0.0))), 0) if gpu_avail else 0.0
+        cpu_cores = int(sys_info.get("cpu_cores", pushed_vm.get("cpu_cores", 0)) or 2)
         cpu_util = round(float(sys_info.get("cpu_util_est_pct", pushed_vm.get("cpu_util_pct", 0.0))), 1)
+        load_1m = round(float(sys_info.get("load_1m", 0.0)), 2)
         ram_used = round(float(sys_info.get("ram_used_gb", pushed_vm.get("ram_used_gb", 0.0))), 1)
         ram_total = round(float(sys_info.get("ram_total_gb", pushed_vm.get("ram_total_gb", 0.0))), 1)
         drive_mounted = bool(drive.get("mounted", pushed_vm.get("drive_mounted", False)))
@@ -355,6 +358,19 @@ def main():
         if not has_probe:
             is_low = (kernel_state == "idle")
             reason = f"内核 {kernel_state.upper()} (正在挂载功耗探针)" if not is_low else "内核空闲 (IDLE)"
+        elif hb and hb.get("age_seconds", 999) < 45 and hb.get("active", True):
+            is_low = False
+            reason = f"任务心跳活跃 ({hb.get('task', 'job')})"
+        elif not gpu_avail or acc in ("NONE", "CPU"):
+            if cpu_util >= CPU_ONLY_MIN_UTIL_PCT or load_1m >= 0.4:
+                is_low = False
+                reason = f"CPU 数据处理活跃 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used:.1f}/{ram_total:.0f}GB)"
+            elif kernel_state == "busy":
+                is_low = False
+                reason = f"CPU 内核忙碌执行中 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used:.1f}/{ram_total:.0f}GB)"
+            else:
+                is_low = True
+                reason = f"CPU 节点空载待机 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used:.1f}/{ram_total:.0f}GB, 内核 IDLE)"
         elif power_is_active and gpu_util >= GPU_MIN_UTIL_PCT:
             is_low = False
             reason = f"显卡高功耗时真负载 ({power_w:.0f}W, GPU {gpu_util:.1f}%)"
@@ -367,9 +383,6 @@ def main():
         elif kernel_state == "busy" and cpu_util >= CPU_MIN_UTIL_PCT:
             is_low = False
             reason = f"CPU/云盘密集处理中 (CPU {cpu_util:.1f}%, GPU {power_w:.0f}W)"
-        elif hb and hb.get("age_seconds", 999) < 45 and hb.get("active", True):
-            is_low = False
-            reason = f"任务心跳活跃 ({hb.get('task', 'job')})"
         else:
             is_low = True
             vram_gb = vram_used / 1024.0
@@ -407,6 +420,7 @@ def main():
             "power_draw_w": power_w,
             "power_limit_w": power_lim,
             "temp_c": temp_c,
+            "cpu_cores": cpu_cores,
             "cpu_util_pct": cpu_util,
             "ram_used_gb": ram_used,
             "ram_total_gb": ram_total,

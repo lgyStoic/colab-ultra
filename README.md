@@ -38,9 +38,23 @@ colab-ultra/
     ├── init_20tb_drive.py        # 开机自动挂载 Google Drive、软链工作区并恢复断电抢救文件
     ├── check_env.py              # 远端 PyTorch / CUDA / 显存与 BF16 环境快速自检
     ├── a100_benchmark.py         # A100/H100 FP32/TF32/BF16 GEMM 算力与 FlashAttention-2 基准测试
+    ├── cpu_data_pipeline.py      # 多核高内存纯 CPU 数据清洗/分片并行处理基准工作流
     ├── ai_image_gen.py           # 开源生图工作流示例（自动持久化至云盘）
     └── llm_runner.py             # 开源大模型推理工作流示例（共享云盘 HuggingFace 缓存）
 ```
+
+---
+
+## 📊 Google One AI Ultra / Colab Pro+ 纯 CPU 与大数据处理实测规格表
+
+做数据清洗、Parquet/Arrow 转换、去重分片或爬虫预处理时，完全不需要烧昂贵的 A100（`5.39 CU/h`）。`colab-ultra` 内置了针对**纯 CPU 与超大内存数据处理**的分级调度与 CPU 负载保护（不会因为没有 GPU 瓦数而误杀正在跑数据的 CPU 节点，跑完空闲 10 分钟同样自动备份并关机）：
+
+| 模式 | 启动命令 | CPU 规格 | 内存 (RAM) | 本地磁盘 | 扣费速率 | 适用场景 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **标准 CPU** | `colab-ultra up --cpu --std-mem` | **2 vCPU** (Intel Xeon) | **12.7 GB** | 225 GB | **`0.08 CU/h`** | 极低成本长时下载、解压、API 批处理（1 CU 可跑 12.5 小时） |
+| **高内存 CPU (默认推荐)** | `colab-ultra up --cpu` | **8 vCPU** (AMD EPYC 7B12) | **51.0 GB** | 225 GB | **`0.26 CU/h`** | 日常多进程数据预处理、Polars/Pandas 大表清洗（比 A100 便宜 20 倍） |
+| **5 节点 CPU 并发集群** | `colab-ultra up --cpu --workers 5 -s data` | **40 vCPU** (5 × 8 核) | **255 GB** (5 × 51G) | 1.1 TB + 共享云盘 | **`1.30 CU/h`** | 大规模数据集分片并行处理（5 台机器同时读写同一个 Google Drive） |
+| **44 核超大内存单机** | `colab-ultra up --tpu v6e1 -s bigmem` | **44 vCPU** (AMD EPYC 9B14 Zen4) | **172.0 GB** | 225 GB | **`5.09 CU/h`** | 单机需 >100GB 内存的巨型内存数据库（DuckDB / 图计算 / 全量去重） |
 
 ---
 
@@ -78,6 +92,15 @@ colab-ultra init --vps root@your-vps-ip --alert-minutes 5 --stop-minutes 10
 # 默认启动省钱的 Tesla T4 并自动挂载 Google Drive：
 colab-ultra up -s work
 
+# 启动 8 核 51GB 高内存纯 CPU 节点做数据清洗（仅 0.26 CU/h）：
+colab-ultra up --cpu -s data
+
+# 一次性并发拉起 5 台 8 核 51GB 纯 CPU 集群（合计 40 核 + 255GB 内存，共享云盘）：
+colab-ultra up --cpu --workers 5 -s data
+
+# 启动 44 核 AMD EPYC Zen4 + 172GB 超大内存单机（借道 TPU v6e1 宿主机）：
+colab-ultra up --tpu v6e1 -s bigmem
+
 # 启动 A100 / H100 跑大模型或 DiT LoRA 微调：
 colab-ultra up -s ultra --gpu A100
 ```
@@ -94,6 +117,7 @@ colab-ultra status --json
 ### 3. 远程执行代码/脚本并返回实时硬件遥测（Agent-First）
 ```bash
 colab-ultra exec -s ultra "import torch; print(torch.cuda.get_device_name(0))" --json
+colab-ultra exec -s data -f workflows/cpu_data_pipeline.py --json
 colab-ultra exec -s ultra -f workflows/check_env.py --json
 colab-ultra exec -s ultra -f workflows/a100_benchmark.py --json
 colab-ultra exec -s ultra -f workflows/ai_image_gen.py --json
