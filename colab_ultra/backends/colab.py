@@ -1,5 +1,6 @@
 import base64
 import json
+import ssl
 import sys
 import time
 import uuid
@@ -7,7 +8,6 @@ import uuid
 import requests
 from colab_cli.auth import AuthProvider
 from colab_cli.common import state as colab_state
-from colab_cli.runtime import ColabRuntime
 
 from colab_ultra.backends.jupyter import jupyter_headers
 
@@ -20,7 +20,6 @@ colab_state.auth_provider = AuthProvider.ADC
 def backup_vm_outputs_to_drive(proxy_url: str, proxy_token: str):
     """If Drive is mounted and /content/outputs exists, copy to emergency_backups before shutdown."""
     try:
-        rt = ColabRuntime(proxy_url, proxy_token)
         code = (
             "import os, shutil, time\n"
             "if os.path.isdir('/content/drive/MyDrive') and os.path.isdir('/content/outputs'):\n"
@@ -28,8 +27,7 @@ def backup_vm_outputs_to_drive(proxy_url: str, proxy_token: str):
             "    os.makedirs(os.path.dirname(dst), exist_ok=True)\n"
             "    shutil.copytree('/content/outputs', dst, dirs_exist_ok=True)\n"
         )
-        rt.execute_code(code, timeout=6)
-        rt.stop()
+        jupyter_exec_ws(proxy_url, code, proxy_token=proxy_token, timeout=6)
     except Exception:
         pass
 
@@ -91,22 +89,38 @@ def assignments():
 
 def run_detached(args, wrapped_code):
     """Submit once and collect incremental logs from the detached job."""
+    from .jupyter import jupyter_ensure_kernel_id
+
+    class _PollTransientError(RuntimeError):
+        pass
+
     timeout_sec = args.timeout
 
     p_url, p_tok = resolve_proxy(args.session)
     last_token_refresh = time.monotonic()
+    kernel_id: str | None = None
     if args.restart_kernel:
         restart_vm_kernel(p_url, p_tok)
 
-    def _short_ws_exec(code, call_timeout=25.0):
+    def _refresh_proxy():
         nonlocal p_url, p_tok, last_token_refresh
+        p_url, p_tok = resolve_proxy(args.session)
+        last_token_refresh = time.monotonic()
+
+    def _http_status(exc):
+        return (getattr(getattr(exc, "response", None), "status_code", None)
+                or getattr(exc, "status_code", None) or getattr(exc, "code", None))
+
+    def _short_ws_exec(code, call_timeout=25.0):
+        nonlocal kernel_id
         if time.monotonic() - last_token_refresh > 2400:
-            p_url, p_tok = resolve_proxy(args.session)
-            last_token_refresh = time.monotonic()
+            _refresh_proxy()
         try:
-            return jupyter_exec_ws(p_url, code, proxy_token=p_tok, timeout=call_timeout)
+            if kernel_id is None:
+                kernel_id = retry(lambda: jupyter_ensure_kernel_id(p_url, p_tok))
+            return jupyter_exec_ws(p_url, code, proxy_token=p_tok, kernel_id=kernel_id, timeout=call_timeout)
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
+            status = _http_status(exc) or _http_status(exc.__cause__)
             if status in (404, 410) or "active colab session" in str(exc).lower():
                 raise SystemExit(lost_session_message(args.session)) from exc
             raise
@@ -160,6 +174,7 @@ def run_detached(args, wrapped_code):
     deadline = t0 + float(timeout_sec)
     offset = 0
     consecutive_errors = 0
+    session_lost = False
 
     try:
         while True:
@@ -199,18 +214,38 @@ def run_detached(args, wrapped_code):
             try:
                 p_rc, p_out, p_err = _short_ws_exec(poll_code, call_timeout=25.0)
                 if p_rc != 0:
-                    raise RuntimeError(p_err or p_out or "poll returned non-zero")
+                    raise _PollTransientError(p_err or p_out or f"poll exited with {p_rc}")
                 consecutive_errors = 0
             except Exception as exc:
                 consecutive_errors += 1
-                if consecutive_errors >= 5 or not transient(exc.__cause__ or exc):
-                    err_str = f"[colab-ultra] Unable to read {remote_log}. Check colab-ultra status and job output: {exc}\n"
+                is_retryable = isinstance(exc, _PollTransientError) or transient(exc)
+                if isinstance(exc, RuntimeError) and not is_retryable:
+                    cause = exc.__cause__
+                    if isinstance(cause, (ValueError, ssl.SSLError, requests.exceptions.SSLError)) or _http_status(cause):
+                        is_retryable = transient(cause)
+                    else:
+                        is_retryable = (
+                            "Jupyter closed after submission" in str(exc)
+                            or "Jupyter connection lost after submission" in str(exc)
+                            or (cause is not None and transient(cause))
+                        )
+                poll_error = exc
+                if consecutive_errors < 8 and is_retryable:
+                    kernel_id = None
+                    try:
+                        _refresh_proxy()
+                    except Exception as refresh_error:
+                        if not transient(refresh_error):
+                            poll_error = refresh_error
+                            is_retryable = False
+                if consecutive_errors >= 8 or not is_retryable:
+                    err_str = f"[colab-ultra] Unable to read {remote_log}. Check colab-ultra status and job output: {poll_error}\n"
                     if not is_json_mode:
                         sys.stderr.write(err_str)
                         sys.stderr.flush()
                     ret_code = 1
                     break
-                time.sleep(2 ** (consecutive_errors - 1))
+                time.sleep(min(15.0, 2 ** (consecutive_errors - 1)))
                 continue
 
             rec = None
@@ -255,6 +290,9 @@ def run_detached(args, wrapped_code):
                 time.sleep(2.5)
             else:
                 time.sleep(4.0)
+    except SystemExit:
+        session_lost = True
+        raise
     except KeyboardInterrupt:
         if remote_pgid:
             try:
@@ -263,16 +301,17 @@ def run_detached(args, wrapped_code):
                 pass
         ret_code = 130
     finally:
-        try:
-            _short_ws_exec(
-                f"import os\nfor _p in ({remote_py!r}, {remote_rc!r}, {remote_pid_file!r}):\n"
-                "    if os.path.exists(_p):\n"
-                "        try: os.remove(_p)\n"
-                "        except OSError: pass\n",
-                call_timeout=10.0,
-            )
-        except Exception:
-            pass
+        if not session_lost:
+            try:
+                _short_ws_exec(
+                    f"import os\nfor _p in ({remote_py!r}, {remote_rc!r}, {remote_pid_file!r}):\n"
+                    "    if os.path.exists(_p):\n"
+                    "        try: os.remove(_p)\n"
+                    "        except OSError: pass\n",
+                    call_timeout=10.0,
+                )
+            except Exception:
+                pass
 
     out_str = "".join(out_chunks)
     return ret_code, out_str, err_str
