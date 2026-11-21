@@ -16,16 +16,16 @@ MY_DRIVE = "/content/drive/MyDrive"
 HUB_ROOT = "/content/drive/MyDrive/ColabUltra"
 
 DIRS = [
-    "models/llm",          # 大语言模型权重 (Qwen, Llama, DeepSeek 等)
-    "models/checkpoints",  # 生图/生视频基础大模型 (FLUX, SD3.5, Wan2.1 等)
+    "scripts",             # 跨项目公共脚本 (fast_stage_nvme.py, vram_policy.py)
+    "bin/aria2_debs",      # aria2 离线 Ubuntu .deb 缓存 (~1s 极速安装)
+    "models/llm",          # 大语言模型持久化权重 (运行时请通过 fast_stage_nvme.py 拉至本地 NVMe)
+    "models/checkpoints",  # 生图/生视频基础大模型
     "models/loras",        # LoRA 微调权重
     "models/vae_clip",     # VAE / Text Encoder 组件
     "datasets",            # 训练与微调数据集
     "outputs/images",      # AI 生图输出永久归档
     "outputs/videos",      # AI 生视频输出永久归档
     "outputs/training",    # 模型训练 Checkpoints 与日志
-    "hf_cache",            # HuggingFace 全局缓存 (HF_HOME)
-    "torch_cache",         # PyTorch Hub 全局缓存 (TORCH_HOME)
     "workspace",           # 永久工作目录 (软链接至 /content/workspace，断电重启零丢失)
     "emergency_backups",   # 智能电闸拉闸前自动抢救备份区
     "emergency_backups/latest_root_files",  # 根目录散落脚本/笔记本自动快照与恢复区
@@ -41,7 +41,7 @@ def setup_drive_hub():
         print("⚠️ 检测到 /content/drive/MyDrive 尚未挂载，尝试挂载中...")
         try:
             from google.colab import drive
-            drive.mount(DRIVE_MOUNT)
+            drive._mount(DRIVE_MOUNT, ephemeral=False)
         except Exception as e:
             print(f"❌ 自动挂载需要授权，请先在本地运行: colab drivemount -s <会话名> ({e})")
             return False
@@ -87,6 +87,7 @@ def setup_drive_hub():
         "COLAB_ULTRA_ROOT": HUB_ROOT,
         "HF_HOME": os.path.join(HUB_ROOT, "hf_cache"),
         "TORCH_HOME": os.path.join(HUB_ROOT, "torch_cache"),
+        "PIP_CACHE_DIR": os.path.join(HUB_ROOT, "pip_cache"),
     }
     for k, v in env_vars.items():
         os.environ[k] = v
@@ -94,6 +95,11 @@ def setup_drive_hub():
     profile_snippet = "\n".join([f'export {k}="{v}"' for k, v in env_vars.items()]) + "\n"
     with open("/content/.ultra_env.sh", "w") as f:
         f.write(profile_snippet)
+
+    # Pre-install FlashAttention-4 skipped: Blackwell G4 (sm_120) uses native cuDNN SDPA
+    # if os.path.exists("/dev/nvidia0"):
+    #     import subprocess, sys
+    #     ...
 
     # Quick internal network write/read speed test to Google Drive
     test_file = os.path.join(HUB_ROOT, ".speedtest.tmp")

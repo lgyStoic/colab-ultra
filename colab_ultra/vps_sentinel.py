@@ -33,8 +33,10 @@ LOCAL_ADC_FALLBACK = os.path.expanduser("~/.config/gcloud/application_default_cr
 PROBE_SCRIPT_PATH = _sentinel_cfg.get("probe_script_path", "/usr/local/share/colab_probe.py")
 TOKEN_CACHE_PATH = "/var/tmp/colab_oauth_token.json"
 IDLE_STATE_PATH = "/var/tmp/colab_breaker_state.json"
+LAST_TRAINING_PATH = "/var/tmp/colab_last_training.json"
 PUSHED_STATS_PATH = "/tmp/colab_stats.json"
 OUT_PATH = os.environ.get("COLAB_STATS_OUT", _sentinel_cfg.get("out_path", "/var/www/html/colab_stats.json"))
+MONITOR_OUT_PATH = "/var/www/html/monitor-7d9a2b/colab_stats.json"
 
 COLAB_DOMAIN = "https://colab.research.google.com"
 XSSI_PREFIX = ")]}'\n"
@@ -264,6 +266,95 @@ def backup_and_unassign(endpoint: str, proxy_url: str, proxy_token: str, token: 
         return False
 
 
+def sync_training_to_tensorboard(training: dict, proxy_url: str = "", proxy_token: str = ""):
+    """Incrementally write training scalar logs and sample contact sheets into /var/lib/tensorboard_logs/<run>."""
+    if not training or not isinstance(training, dict):
+        return
+    run_name = training.get("run_name") or "default_run"
+    tb_python = "/opt/tb-venv/bin/python"
+    if not os.path.exists(tb_python):
+        return
+    run_log_dir = f"/var/lib/tensorboard_logs/{run_name}"
+    state_file = f"/var/lib/tensorboard_logs/.sync_state_{run_name}.json"
+    os.makedirs(run_log_dir, exist_ok=True)
+
+    state = {"max_it": -1, "samples": []}
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            pass
+
+    new_records = []
+    for line in training.get("recent_lines") or []:
+        try:
+            rec = json.loads(line)
+            it_val = int(rec.get("it", 0))
+            if it_val > int(state.get("max_it", -1)):
+                new_records.append(rec)
+        except Exception:
+            pass
+
+    new_samples = []
+    log_path = training.get("log_path") or ""
+    remote_run_dir = os.path.dirname(log_path) if log_path else ""
+    seen_samples = set(state.get("samples") or [])
+    if proxy_url and proxy_token and remote_run_dir:
+        for s_fn in training.get("samples") or []:
+            if s_fn not in seen_samples:
+                try:
+                    rel_p = f"{remote_run_dir.lstrip('/')}/samples/{s_fn}"
+                    item = proxy_request_json(proxy_url, proxy_token, f"/api/contents/{rel_p}?content=1", timeout=8.0)
+                    b64_data = item.get("content")
+                    if b64_data:
+                        local_img = os.path.join(run_log_dir, s_fn)
+                        with open(local_img, "wb") as img_f:
+                            img_f.write(base64.b64decode(b64_data))
+                        new_samples.append((s_fn, local_img))
+                except Exception:
+                    pass
+
+    if not new_records and not new_samples:
+        return
+
+    payload_json = json.dumps({"run_log_dir": run_log_dir, "records": new_records, "samples": new_samples})
+    helper_code = (
+        "import json, sys, os\n"
+        "from tensorboardX import SummaryWriter\n"
+        "from PIL import Image\n"
+        "import numpy as np\n"
+        "d = json.loads(sys.stdin.read())\n"
+        "w = SummaryWriter(logdir=d['run_log_dir'])\n"
+        "for rec in d['records']:\n"
+        "    it = int(rec.get('it', 0))\n"
+        "    for k, v in rec.items():\n"
+        "        if k != 'it' and isinstance(v, (int, float)):\n"
+        "            w.add_scalar(f'train/{k}', float(v), it)\n"
+        "for fn, p in d['samples']:\n"
+        "    stem = os.path.splitext(fn)[0]\n"
+        "    parts = stem.split('_')\n"
+        "    step_tag = parts[0] if parts else '0'\n"
+        "    nfe_tag = parts[1] if len(parts) > 1 else 'sample'\n"
+        "    step_num = 0 if step_tag == 'init' else (int(step_tag) if step_tag.isdigit() else 0)\n"
+        "    arr = np.array(Image.open(p).convert('RGB'))\n"
+        "    w.add_image(f'samples/{nfe_tag}_sheet', arr, step_num, dataformats='HWC')\n"
+        "w.flush()\n"
+        "w.close()\n"
+    )
+    try:
+        subprocess.run([tb_python, "-c", helper_code], input=payload_json, text=True, timeout=15, check=False)
+        for rec in new_records:
+            state["max_it"] = max(int(state.get("max_it", -1)), int(rec.get("it", 0)))
+        for s_fn, _ in new_samples:
+            if s_fn not in state["samples"]:
+                state["samples"].append(s_fn)
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
 def main():
     now = time.time()
     token = get_access_token()
@@ -308,10 +399,51 @@ def main():
         if proxy_url and proxy_token:
             try:
                 kernels = proxy_request_json(proxy_url, proxy_token, "/api/kernels")
+                busy_kid = None
                 if isinstance(kernels, list):
                     for k in kernels:
                         if k.get("execution_state") == "busy":
                             kernel_state = "busy"
+                            busy_kid = k.get("id")
+                            break
+                if busy_kid:
+                    try:
+                        import websocket
+                        ws_base = proxy_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+                        sid = uuid.uuid4().hex
+                        ws_url = f"{ws_base}/api/kernels/{busy_kid}/channels?session_id={sid}&colab-runtime-proxy-token={proxy_token}"
+                        ws = websocket.create_connection(
+                            ws_url,
+                            header=[
+                                f"Authorization: Bearer {proxy_token}",
+                                f"X-Colab-Runtime-Proxy-Token: {proxy_token}",
+                                "X-Colab-Client-Agent: colab-cli",
+                            ],
+                            timeout=5,
+                        )
+                        try:
+                            ws.send(
+                                json.dumps({
+                                    "header": {
+                                        "msg_id": uuid.uuid4().hex,
+                                        "username": "colab-ultra-vps",
+                                        "session": sid,
+                                        "msg_type": "kernel_info_request",
+                                        "version": "5.3",
+                                        "date": datetime.now(timezone.utc).isoformat(),
+                                    },
+                                    "parent_header": {},
+                                    "metadata": {},
+                                    "content": {},
+                                    "buffers": [],
+                                    "channel": "shell",
+                                })
+                            )
+                            ws.ping()
+                        finally:
+                            ws.close()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -327,6 +459,9 @@ def main():
 
             if not telemetry or (now - telemetry.get("unix_time", 0)) > 30:
                 telemetry = ensure_probe_deployed_from_vps(proxy_url, proxy_token)
+            if telemetry and (now - telemetry.get("unix_time", 0)) > 60:
+                # Never trust a frozen/stale telemetry file (>60s old) for low-wattage breaker decisions
+                telemetry = {}
 
         pushed_vm = pushed_by_ep.get(ep, {})
         gpu = telemetry.get("gpu") or {}
@@ -334,7 +469,7 @@ def main():
         drive = telemetry.get("drive") or {}
         hb = telemetry.get("task_heartbeat") or pushed_vm.get("task_heartbeat")
 
-        gpu_avail = bool(gpu.get("available")) if gpu else bool(pushed_vm.get("gpu_available"))
+        gpu_avail = bool(gpu.get("available")) if gpu else (bool(pushed_vm.get("gpu_available")) or acc not in ("NONE", "CPU"))
         gpu_name = gpu.get("name") or pushed_vm.get("gpu_name") or (acc if acc != "NONE" else "CPU")
         gpu_util = round(float(gpu.get("gpu_util_pct", pushed_vm.get("gpu_util_pct", 0.0))), 1) if gpu_avail else 0.0
         vram_used = round(float(gpu.get("vram_used_mib", pushed_vm.get("vram_used_mib", 0.0))), 0) if gpu_avail else 0.0
@@ -345,12 +480,13 @@ def main():
         cpu_cores = int(sys_info.get("cpu_cores", pushed_vm.get("cpu_cores", 0)) or 2)
         cpu_util = round(float(sys_info.get("cpu_util_est_pct", pushed_vm.get("cpu_util_pct", 0.0))), 1)
         load_1m = round(float(sys_info.get("load_1m", 0.0)), 2)
+        io_mb_s = round(float(sys_info.get("io_mb_s", pushed_vm.get("io_mb_s", 0.0))), 2)
         ram_used = round(float(sys_info.get("ram_used_gb", pushed_vm.get("ram_used_gb", 0.0))), 1)
         ram_total = round(float(sys_info.get("ram_total_gb", pushed_vm.get("ram_total_gb", 0.0))), 1)
         drive_mounted = bool(drive.get("mounted", pushed_vm.get("drive_mounted", False)))
         drive_free_tb = round(float(drive.get("free_tb", pushed_vm.get("drive_free_tb") or 0.0)), 2) if drive_mounted else None
 
-        has_probe = bool(gpu or sys_info or pushed_vm)
+        has_probe = bool(gpu or sys_info) if acc not in ("NONE", "CPU") else bool(gpu or sys_info or pushed_vm)
         min_active_watts = 75.0 if power_lim >= 250.0 else 28.0
         power_is_active = (power_w >= min_active_watts) if power_w > 0 else False
         power_is_dead_idle = (power_w > 0 and power_w < min_active_watts)
@@ -362,9 +498,9 @@ def main():
             is_low = False
             reason = f"任务心跳活跃 ({hb.get('task', 'job')})"
         elif not gpu_avail or acc in ("NONE", "CPU"):
-            if cpu_util >= CPU_ONLY_MIN_UTIL_PCT or load_1m >= 0.4:
+            if cpu_util >= CPU_ONLY_MIN_UTIL_PCT or load_1m >= 0.4 or io_mb_s >= 2.0:
                 is_low = False
-                reason = f"CPU 数据处理活跃 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used:.1f}/{ram_total:.0f}GB)"
+                reason = f"CPU 数据处理活跃 ({cpu_cores}核 CPU {cpu_util:.1f}%, I/O {io_mb_s:.1f}MB/s, 内存 {ram_used:.1f}/{ram_total:.0f}GB)"
             elif kernel_state == "busy":
                 is_low = False
                 reason = f"CPU 内核忙碌执行中 ({cpu_cores}核 CPU {cpu_util:.1f}%, 内存 {ram_used:.1f}/{ram_total:.0f}GB)"
@@ -380,9 +516,9 @@ def main():
         elif not power_is_dead_idle and gpu_util >= GPU_MIN_UTIL_PCT:
             is_low = False
             reason = f"GPU 活跃计算中 ({gpu_util:.1f}%)"
-        elif kernel_state == "busy" and cpu_util >= CPU_MIN_UTIL_PCT:
+        elif kernel_state == "busy" and (cpu_util >= CPU_MIN_UTIL_PCT or io_mb_s >= 2.0):
             is_low = False
-            reason = f"CPU/云盘密集处理中 (CPU {cpu_util:.1f}%, GPU {power_w:.0f}W)"
+            reason = f"CPU/云盘密集处理中 (CPU {cpu_util:.1f}%, I/O {io_mb_s:.1f}MB/s, GPU {power_w:.0f}W)"
         else:
             is_low = True
             vram_gb = vram_used / 1024.0
@@ -405,6 +541,14 @@ def main():
                 continue
 
         new_idle_state[ep] = {"low_load_sec": low_sec, "last_ts": now}
+        training = telemetry.get("training") or pushed_vm.get("training")
+        if training:
+            try:
+                with open(LAST_TRAINING_PATH, "w", encoding="utf-8") as f:
+                    json.dump(training, f, ensure_ascii=False)
+                sync_training_to_tensorboard(training, proxy_url, proxy_token)
+            except Exception:
+                pass
 
         vm_list.append({
             "name": pushed_vm.get("name", "colab-vm"),
@@ -422,6 +566,7 @@ def main():
             "temp_c": temp_c,
             "cpu_cores": cpu_cores,
             "cpu_util_pct": cpu_util,
+            "io_mb_s": io_mb_s,
             "ram_used_gb": ram_used,
             "ram_total_gb": ram_total,
             "drive_mounted": drive_mounted,
@@ -431,7 +576,20 @@ def main():
             "low_load_sec": low_sec,
             "stop_after_sec": STOP_AFTER_SEC,
             "task_heartbeat": hb,
+            "training": training,
         })
+
+    last_training = None
+    for v in vm_list:
+        if v.get("training"):
+            last_training = v["training"]
+            break
+    if not last_training and os.path.exists(LAST_TRAINING_PATH):
+        try:
+            with open(LAST_TRAINING_PATH, "r", encoding="utf-8") as f:
+                last_training = json.load(f)
+        except Exception:
+            last_training = None
 
     try:
         with open(IDLE_STATE_PATH, "w", encoding="utf-8") as f:
@@ -459,6 +617,7 @@ def main():
         "eligible_tpus": ccu.get("eligibleTpus") or ["V6E1", "V5E1"],
         "active_vms_count": len(vm_list),
         "vms": vm_list,
+        "last_training": last_training,
         "breaker_config": {
             "gpu_min_util_pct": GPU_MIN_UTIL_PCT,
             "alert_after_minutes": ALERT_AFTER_SEC // 60,
@@ -466,11 +625,15 @@ def main():
         },
     }
 
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
-    tmp_path = OUT_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, OUT_PATH)
+    for target_out in (OUT_PATH, MONITOR_OUT_PATH):
+        try:
+            os.makedirs(os.path.dirname(target_out), exist_ok=True)
+            tmp_path = target_out + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target_out)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ def apply_upstream_patches() -> list[str]:
     except ImportError:
         return ["跳过补丁：未找到 colab_cli 模块"]
 
-    pkg_dir = os.path.dirname(os.path.realpath(colab_cli.__file__))
+    pkg_dir = os.path.dirname(os.path.realpath(getattr(colab_cli, "__file__", None) or list(colab_cli.__path__)[0]))
 
     # 1. Patch common.py: default AuthProvider.OAUTH2 -> AuthProvider.ADC
     common_py = os.path.join(pkg_dir, "common.py")
@@ -154,5 +154,112 @@ def apply_upstream_patches() -> list[str]:
                 with open(auto_py, "w", encoding="utf-8") as f:
                     f.write(src)
                 applied.append("commands/automation.py (修复官方 drivemount HTTP 400 Bug)")
+
+        # Upgrade drivemount() to use zero-click dfs_persistent + drive._mount(..., ephemeral=False)
+        old_dm = '''def drivemount(
+    session: Annotated[
+        Optional[str], typer.Option("-s", "--session", help="Session name")
+    ] = None,
+    path: Annotated[str, typer.Argument(help="Mount path")] = "/content/drive",
+):
+    """Mount Google Drive at path"""
+    from colab_cli.common import state
+
+    name = state.resolve_session(session)
+    code = f"from google.colab import drive\\ndrive.mount('{path}')"
+    typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
+    run_automation(
+        name,
+        "drivemount",
+        code,
+        allow_stdin=True,
+        path=path,
+        timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
+    )'''
+        new_dm = '''def drivemount(
+    session: Annotated[
+        Optional[str], typer.Option("-s", "--session", help="Session name")
+    ] = None,
+    path: Annotated[str, typer.Argument(help="Mount path")] = "/content/drive",
+):
+    """Mount Google Drive at path (zero-click dfs_persistent first, ephemeral fallback)"""
+    from colab_cli.common import state
+
+    name = state.resolve_session(session)
+    s = state.get_session(name)
+    typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name} (zero-click dfs_persistent)...")
+    try:
+        url = f"{state.client.colab_domain}/tun/m/credentials-propagation/{s.endpoint}"
+        params = {
+            "authuser": "0",
+            "authtype": "dfs_persistent",
+            "version": "2",
+            "dryrun": "true",
+            "propagate": "true",
+            "record": "false",
+        }
+        creds = state.client.session
+        base_headers = {"X-Colab-Client-Agent": "colab-cli", "Accept": "application/json"}
+        resp = creds.request("GET", url, params=params, headers=base_headers)
+        token = (
+            json.loads(resp.text.split("\\n", 1)[-1]).get("token")
+            if get_status_code(resp) == 200
+            else None
+        )
+        if token:
+            headers = {**base_headers, "x-goog-colab-token": token}
+            params["dryrun"] = "false"
+            resp2 = creds.request("POST", url, params=params, headers=headers)
+            data = json.loads(resp2.text.split("\\n", 1)[-1]) if get_status_code(resp2) == 200 else {}
+            if data.get("success"):
+                code_persistent = f"from google.colab import drive\\ndrive._mount('{path}', ephemeral=False)"
+                run_automation(
+                    name,
+                    "drivemount",
+                    code_persistent,
+                    allow_stdin=False,
+                    path=path,
+                    timeout=120,
+                )
+                return
+    except Exception as e:
+        typer.echo(f"[colab] dfs_persistent fallback notice: {e}")
+
+    code = f"from google.colab import drive\\ndrive.mount('{path}')"
+    run_automation(
+        name,
+        "drivemount",
+        code,
+        allow_stdin=True,
+        path=path,
+        timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
+    )'''
+        if old_dm in src and "dfs_persistent" not in src:
+            src = src.replace(old_dm, new_dm, 1)
+            with open(auto_py, "w", encoding="utf-8") as f:
+                f.write(src)
+            applied.append("commands/automation.py (零弹窗 dfs_persistent 自动挂载云盘)")
+
+    # 5. Patch commands/execution.py: add timeout=15.0 to initial chdir('/content') call
+    exec_py = os.path.join(pkg_dir, "commands", "execution.py")
+    if os.path.exists(exec_py):
+        with open(exec_py, "r", encoding="utf-8") as f:
+            src = f.read()
+        old_chdir = (
+            '        runtime.execute_code(\n'
+            '            "import os; os.makedirs(\'/content\', exist_ok=True); os.chdir(\'/content\')"\n'
+            '        )'
+        )
+        new_chdir = (
+            '        runtime.execute_code(\n'
+            '            "import os; os.makedirs(\'/content\', exist_ok=True); os.chdir(\'/content\')",\n'
+            '            timeout=15.0,\n'
+            '        )'
+        )
+        if old_chdir in src:
+            src = src.replace(old_chdir, new_chdir)
+            with open(exec_py, "w", encoding="utf-8") as f:
+                f.write(src)
+            applied.append("commands/execution.py (修复初始 chdir 无超时卡死问题)")
 
     return applied
