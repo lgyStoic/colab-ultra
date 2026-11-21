@@ -5,6 +5,7 @@ import sys
 from colab_cli.runtime import ColabRuntime
 from colab_ultra.backends.colab import colab_state
 from colab_ultra.backends.jupyter import jupyter_exec_ws
+from colab_ultra.compat.colab_cli_patch import patch_kernel_client
 from colab_ultra.retry import retry
 
 
@@ -98,6 +99,7 @@ def mount_drive(name, path="/content/drive"):
         ws.stdin_channel.send(reply)
         return True
 
+    patch_kernel_client()
     runtime = ColabRuntime(session.url, session.token)
     runtime.colab_request_hook = authorize
     try:

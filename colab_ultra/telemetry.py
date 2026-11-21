@@ -6,7 +6,6 @@ import time
 from datetime import datetime
 
 import requests
-from colab_cli.runtime import ColabRuntime
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -16,6 +15,7 @@ from colab_ultra.backends.colab import (
     colab_state,
     fetch_vm_kernels,
 )
+from colab_ultra.backends.jupyter import jupyter_exec_ws
 from colab_ultra.backends.kaggle import (
     get_kaggle_quota,
     list_active_kaggle_vms,
@@ -26,6 +26,7 @@ from colab_ultra.config import (
     load_config,
 )
 from colab_ultra.drive import detect_local_drive_hub
+from colab_ultra.retry import retry
 
 console = Console()
 
@@ -33,17 +34,13 @@ console = Console()
 def start_remote_probe_via_runtime(proxy_url: str, proxy_token: str):
     kernels = fetch_vm_kernels(proxy_url, proxy_token)
     kid = kernels[0].get("id") if kernels else None
-    rt = ColabRuntime(proxy_url, proxy_token, kernel_id=kid)
-    try:
-        boot_code = (
-            "import subprocess\n"
-            "subprocess.run(['python3', '/content/.colab_probe.py', '--once'], check=False)\n"
-            "subprocess.Popen(['python3', '/content/.colab_probe.py'], "
-            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)\n"
-        )
-        rt.execute_code(boot_code, timeout=12)
-    finally:
-        rt.stop()
+    boot_code = (
+        "import subprocess\n"
+        "subprocess.run(['python3', '/content/.colab_probe.py', '--once'], check=False)\n"
+        "subprocess.Popen(['python3', '/content/.colab_probe.py'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)\n"
+    )
+    jupyter_exec_ws(proxy_url, boot_code, proxy_token=proxy_token, kernel_id=kid, timeout=12)
 
 
 def upload_file_to_vm(proxy_url: str, proxy_token: str, local_path: str, remote_path: str):
@@ -64,7 +61,7 @@ def fetch_vm_telemetry(proxy_url: str, proxy_token: str, auto_deploy: bool = Tru
 
     def _read():
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r = retry(lambda: requests.get(url, params=params, headers=headers, timeout=15), attempts=2)
             if r.status_code == 200:
                 body = r.json()
                 content = body.get("content", "")
