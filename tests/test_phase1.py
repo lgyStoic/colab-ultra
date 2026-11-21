@@ -271,6 +271,7 @@ def test_latest_exec_owns_log(tmp_path, local_job):
 @pytest.mark.parametrize("token,fails", [("short-lived", False), ("short-lived", True), ("", False)])
 def test_kaggle_exec_env(monkeypatch, local_job, token, fails):
     monkeypatch.setattr(session, "_load_kaggle_sessions", lambda: {"ultra": {"proxy_url": "url"}})
+    monkeypatch.setattr(session, "assignments", lambda: [])
     monkeypatch.setattr(session, "kaggle_active", lambda sess: True)
     monkeypatch.setattr(session, "detect_local_drive_hub", lambda: None)
     monkeypatch.setattr(session, "get_short_lived_drive_token", lambda: token)

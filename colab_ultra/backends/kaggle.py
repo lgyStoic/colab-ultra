@@ -41,6 +41,12 @@ from .jupyter import (
 )
 
 KAGGLE_API_BASE = "https://api.kaggle.com/v1"
+
+
+class KaggleFlushError(RuntimeError):
+    """Raised when Kaggle outputs cannot be safely flushed before shutdown."""
+
+
 def is_kaggle_gpu_spec(gpu_choice: str, force_kaggle: bool = False) -> bool:
     if force_kaggle:
         return True
@@ -397,9 +403,11 @@ except Exception as _e:
     jupyter_exec_ws(proxy_url, unpack_code, timeout=600.0)
 
 
-def pull_live_tarball_to_local(proxy_url: str, remote_tar_path: str, local_dest_dir: str) -> int:
+def pull_live_tarball_to_local(
+    proxy_url: str, remote_tar_path: str, local_dest_dir: str, timeout: float = 120.0
+) -> int:
     """Download a pre-packed `.tar.gz` from `/api/contents/` (works even while kernel is BUSY!) and extract locally."""
-    raw = jupyter_get_bytes(proxy_url, "", remote_tar_path, timeout=60.0)
+    raw = jupyter_get_bytes(proxy_url, "", remote_tar_path, timeout=timeout)
     if not raw:
         return 0
     os.makedirs(local_dest_dir, exist_ok=True)
@@ -418,23 +426,12 @@ def pull_live_tarball_to_local(proxy_url: str, remote_tar_path: str, local_dest_
     return count
 
 
-def build_in_vm_sync_snippet(project_name: str | None, drive_token: str | None) -> str:
-    """
-    Generate Python helper snippet injected into Kaggle `exec` wrapper so:
-      1. During training (`_hb_loop` every 20s), modified logs/samples/events in `runs/`
-         are packed into `/content/.cu_live_runs.tar.gz` without blocking training.
-      2. In `finally:` on completion/exception, ALL modified files in `runs/` & `outputs/`
-         are either uploaded directly to Google Drive (if >25MB and `_dtok` available)
-         or packed into `/content/.cu_final_runs.tar.gz` for immediate local extraction.
-    """
-    if not project_name:
-        return "def _cu_pack_runs(final=False): pass\n"
-
+def _build_drive_upload_snippet(drive_token: str | None, project_name: str | None = None) -> str:
     return f"""
-_cu_sync_state = {{}}
+import os
 _cu_drive_tok = {drive_token!r}
 
-def _cu_upload_large_to_drive(local_path, rel_under_proj):
+def _cu_upload_large_to_drive(local_path, rel_under_proj, project_name={project_name!r}):
     if not _cu_drive_tok:
         return False
     try:
@@ -450,7 +447,7 @@ def _cu_upload_large_to_drive(local_path, rel_under_proj):
 
         parts = [p for p in rel_under_proj.split('/') if p]
         pid = _ens_folder('root', 'ColabUltra')
-        pid = _ens_folder(pid, {project_name!r})
+        pid = _ens_folder(pid, project_name)
         for seg in parts[:-1]:
             pid = _ens_folder(pid, seg)
         fname = parts[-1]
@@ -472,15 +469,31 @@ def _cu_upload_large_to_drive(local_path, rel_under_proj):
     except Exception as _e:
         print(f'[colab-ultra] Drive direct upload fallback ({{rel_under_proj}}): {{_e}}')
         return False
+"""
+
+
+def build_in_vm_sync_snippet(project_name: str | None, drive_token: str | None) -> str:
+    """Pack changed `runs/` files during training and prefer Drive upload at job completion."""
+    if not project_name:
+        return "def _cu_pack_runs(final=False): pass\n"
+
+    return _build_drive_upload_snippet(drive_token, project_name) + f"""
+_cu_sync_state = {{}}
 
 def _cu_pack_runs(final=False):
     import tarfile
-    proj_dir = '/content/drive/MyDrive/ColabUltra/{project_name}'
+    proj_dir = os.path.join('/content/drive/MyDrive/ColabUltra', {project_name!r})
     runs_dir = os.path.join(proj_dir, 'runs')
+    out_tar = '/content/_cu_final_runs.tar.gz' if final else '/content/_cu_live_runs.tar.gz'
+    if final:
+        try:
+            os.remove(out_tar)
+        except FileNotFoundError:
+            pass
     if not os.path.isdir(runs_dir):
         return
     to_tar = []
-    max_tar_file = (25 * 1024 * 1024) if (_cu_drive_tok and final) else (220 * 1024 * 1024 if final else 15 * 1024 * 1024)
+    max_tar_file = (220 if final else 15) * 1024 * 1024
     for root, dirs, files in os.walk(runs_dir):
         for fn in files:
             if fn.startswith('._') or fn.endswith('.tmp') or fn.endswith('.part'):
@@ -494,17 +507,16 @@ def _cu_pack_runs(final=False):
             sig = f'{{st.st_size}}:{{int(st.st_mtime)}}'
             if _cu_sync_state.get(rel) == sig:
                 continue
-            if final and st.st_size > max_tar_file and _cu_drive_tok:
+            if final and _cu_drive_tok:
                 if _cu_upload_large_to_drive(ap, rel):
                     _cu_sync_state[rel] = sig
                     continue
-            if st.st_size <= max_tar_file:
+            if (final and _cu_drive_tok) or st.st_size <= max_tar_file:
                 to_tar.append((ap, rel, sig))
             elif final:
                 print(f'⚠️ [colab-ultra] 大文件 {{rel}} ({{st.st_size/1048576:.1f}} MB) 超出免授权回传上限；运行 `colab-ultra init --with-drive-scope` 可开启云对云无限大小直传 Google Drive。')
     if not to_tar:
         return
-    out_tar = '/content/_cu_final_runs.tar.gz' if final else '/content/_cu_live_runs.tar.gz'
     tmp_tar = out_tar + '.tmp'
     with tarfile.open(tmp_tar, 'w:gz', compresslevel=1 if final else 3) as tf:
         for ap, rel, sig in to_tar:
@@ -519,47 +531,80 @@ def _cu_pack_runs(final=False):
 
 
 def flush_kaggle_outputs_before_stop(proxy_url: str, local_hub: str | None):
-    """Best-effort sync of any modified `runs/` files across all projects on `/content/drive/MyDrive/ColabUltra` before stopping."""
-    if not local_hub:
-        return
-    code = """
-import os, tarfile
+    """Return project `runs/` files before permitting the session to stop."""
+    error = ("Kaggle outputs were not fully backed up. Shutdown was aborted to protect container files. "
+             "Use --no-backup to discard the outputs and force shutdown.")
+    try:
+        ks = jupyter_get_kernels(proxy_url, "", timeout=15.0, strict=True)
+    except requests.HTTPError as exc:
+        if getattr(exc.response, "status_code", None) in (404, 410):
+            return
+        raise KaggleFlushError(f"Could not list Kaggle kernels. {error}") from exc
+    except Exception as exc:
+        raise KaggleFlushError(f"Could not list Kaggle kernels. {error}") from exc
+    if not isinstance(ks, list) or any(not isinstance(k, dict) for k in ks):
+        raise KaggleFlushError(f"Could not verify Kaggle kernels. {error}")
+    if any(k.get("execution_state") == "busy" for k in ks):
+        raise KaggleFlushError(f"A Kaggle kernel is busy. {error}")
+
+    remote_tar = "/content/_cu_shutdown_flush.tar.gz"
+    try:
+        code = _build_drive_upload_snippet(get_short_lived_drive_token()) + f"""
+import stat, tarfile
 base = '/content/drive/MyDrive/ColabUltra'
-out_tar = '/content/_cu_shutdown_flush.tar.gz'
+out_tar = {remote_tar!r}
 items = []
-if os.path.isdir(base):
-    for proj in os.listdir(base):
-        pdir = os.path.join(base, proj)
-        rdir = os.path.join(pdir, 'runs')
-        if not os.path.isdir(rdir):
+
+def _cu_raise_walk_error(exc):
+    raise exc
+
+try:
+    projects = os.listdir(base)
+except FileNotFoundError:
+    projects = []
+for proj in projects:
+    pdir = os.path.join(base, proj)
+    rdir = os.path.join(pdir, 'runs')
+    try:
+        if not stat.S_ISDIR(os.stat(rdir).st_mode):
             continue
-        for root, _, files in os.walk(rdir):
-            for fn in files:
-                if fn.startswith('._') or fn.endswith(('.tmp', '.part')):
-                    continue
-                ap = os.path.join(root, fn)
-                try:
-                    sz = os.path.getsize(ap)
-                except OSError:
-                    continue
-                rel = os.path.relpath(ap, base).replace(os.sep, '/')
-                if sz <= 200 * 1024 * 1024:
-                    items.append((ap, rel))
+    except (FileNotFoundError, NotADirectoryError):
+        continue
+    for root, _, files in os.walk(rdir, onerror=_cu_raise_walk_error):
+        for fn in files:
+            if fn.startswith('._') or fn.endswith(('.tmp', '.part')):
+                continue
+            ap = os.path.join(root, fn)
+            rel = os.path.relpath(ap, pdir).replace(os.sep, '/')
+            if _cu_drive_tok and _cu_upload_large_to_drive(ap, rel, proj):
+                continue
+            items.append((ap, proj + '/' + rel))
 if items:
     with tarfile.open(out_tar + '.tmp', 'w:gz', compresslevel=1) as tf:
         for ap, rel in items:
-            try: tf.add(ap, arcname=rel)
-            except Exception: pass
+            tf.add(ap, arcname=rel)
     os.replace(out_tar + '.tmp', out_tar)
-print('FLUSHED:', len(items))
+print('FLUSHED_TAR:', len(items))
 """
+        exit_code, stdout, _ = jupyter_exec_ws(proxy_url, code, timeout=45.0)
+    except Exception as exc:
+        raise KaggleFlushError(f"Could not run the Kaggle backup. {error}") from exc
+    if exit_code:
+        raise KaggleFlushError(f"The Kaggle backup script exited with status {exit_code}. {error}")
+    counts = re.findall(r"^FLUSHED(?:_TAR)?:[ \t]*([0-9]+)[ \t]*$", stdout, re.MULTILINE)
+    if not counts:
+        raise KaggleFlushError(f"The Kaggle backup script did not report an archive count. {error}")
+    expected = int(counts[-1])
+    if not expected:
+        return
+    if not local_hub:
+        raise KaggleFlushError(f"No local Drive hub is available for the Kaggle backup archive. {error}")
     try:
-        ks = jupyter_get_kernels(proxy_url, "", timeout=6.0)
-        if ks and not any(k.get("execution_state") == "busy" for k in ks):
-            jupyter_exec_ws(proxy_url, code, timeout=45.0)
-            pull_live_tarball_to_local(proxy_url, "/content/_cu_shutdown_flush.tar.gz", local_hub)
-    except Exception:
-        pass
+        pulled = pull_live_tarball_to_local(proxy_url, remote_tar, local_hub)
+    except Exception as exc:
+        raise KaggleFlushError(f"Could not retrieve the Kaggle backup archive. {error}") from exc
+    if pulled != expected:
+        raise KaggleFlushError(f"Retrieved {pulled} of {expected} Kaggle backup files. {error}")
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import sys
 import time
 from textwrap import indent
 
+from requests.exceptions import RequestException
 from rich.console import Console
 
 from colab_ultra.alerts import log_breaker_event
@@ -24,6 +25,7 @@ from colab_ultra.backends.colab import (
 from colab_ultra.backends.jupyter import jupyter_exec_ws, jupyter_get_bytes
 from colab_ultra.backends.kaggle import (
     _load_kaggle_sessions,
+    _save_kaggle_sessions,
     build_in_vm_sync_snippet,
     forget_kaggle_session,
     get_kaggle_quota,
@@ -289,6 +291,11 @@ def cmd_up(args):
                 if not getattr(args, "json", False):
                     console.print(f"[yellow]⚠️ 节点 [{s_name}] 启动受限 (已开启 {len(started_sessions)} 台): {e}[/yellow]")
                 break
+            # A successful Colab launch takes over the local session name.
+            kaggle_sessions = _load_kaggle_sessions()
+            if s_name in kaggle_sessions:
+                del kaggle_sessions[s_name]
+                _save_kaggle_sessions(kaggle_sessions)
 
     colab_state._sessions = None  # new ran in a separate process
     # Deploy telemetry probe and refresh dashboard (force fresh read after Drive mount)
@@ -511,11 +518,14 @@ def cmd_exec(args):
             "    sys.path.insert(0, _code_dir)\n"
         )
 
-    # Check if target session is an active Kaggle Free Dual-T4 session
-    k_sessions = _load_kaggle_sessions()
-    k_sess = k_sessions.get(args.session)
-    if k_sess:
-        if not k_sess.get("proxy_url") or not kaggle_active(k_sess):
+    k_sess = _load_kaggle_sessions().get(args.session)
+    # Prefer a live Colab assignment over a persisted Kaggle record.
+    if k_sess and not any(vm["name"] == args.session for vm in assignments()):
+        try:
+            active = k_sess.get("proxy_url") and kaggle_active(k_sess)
+        except (RequestException, ValueError) as exc:
+            raise SystemExit(f"Cannot verify Kaggle session {args.session}. Run colab-ultra status or retry.") from exc
+        if not active:
             raise SystemExit(f"Lost Kaggle session {args.session}. Run colab-ultra status, then "
                              f"colab-ultra up -s {args.session} --kaggle.")
 
@@ -693,7 +703,9 @@ def cmd_down(args):
 def _down(args):
     """Release selected sessions, then settle their billing records."""
     cfg = load_config()
-    vms = assignments() + list(_load_kaggle_sessions().values())
+    colab_vms = assignments()
+    colab_names = {vm["name"] for vm in colab_vms}
+    vms = colab_vms + [vm for name, vm in _load_kaggle_sessions().items() if name not in colab_names]
     if not vms:
         if args.json:
             print(json.dumps({"ok": True, "unassigned": [], "active_vms_count": 0}))
@@ -707,13 +719,14 @@ def _down(args):
         if len(targets) != 1:
             raise SystemExit("Select one active session with colab-ultra down -s NAME. Run colab-ultra status.")
     local_hub = detect_local_drive_hub()
+    backup = cfg.get("auto_backup_to_drive_before_stop", True) and not getattr(args, "no_backup", False)
     unassigned = []
     failures = []
     for vm in targets:
         if not args.json:
             console.print(f"Releasing {vm['name']} ({vm['endpoint']})...")
         try:
-            teardown_verified(vm, local_hub, cfg.get("auto_backup_to_drive_before_stop", True))
+            teardown_verified(vm, local_hub, backup=backup)
         except Exception as exc:
             failures.append(f"{vm['name']}: {exc}")
             print(f"Release unverified for {failures[-1]}", file=sys.stderr)

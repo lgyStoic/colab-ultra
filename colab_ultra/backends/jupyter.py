@@ -61,17 +61,21 @@ def map_contents_path(proxy_url: str, remote_path: str) -> str:
     return clean
 
 
-def jupyter_get_kernels(proxy_url: str, proxy_token: str = "", timeout: float = 10.0) -> list | None:
+def jupyter_get_kernels(
+    proxy_url: str, proxy_token: str = "", timeout: float = 10.0, *, strict: bool = False
+) -> list | None:
+    """List kernels, optionally propagating HTTP and transport errors to the caller."""
     url = f"{proxy_url.rstrip('/')}/api/kernels"
     params, headers = jupyter_headers(proxy_url, proxy_token)
     try:
         r = requests.get(url, params=params, headers=headers, timeout=timeout)
         if r.status_code == 200:
             return r.json()
-        if r.status_code in (401, 403, 404, 502, 503, 504):
-            return None
+        if strict:
+            r.raise_for_status()
     except Exception:
-        return None
+        if strict:
+            raise
     return None
 
 

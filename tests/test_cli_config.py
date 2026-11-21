@@ -5,14 +5,14 @@ from colab_ultra import cli, config
 from colab_ultra.compat.colab_cli_patch import check_compatibility
 
 
-# Taken from the pre-refactor argparse help, including short aliases.
+# Expected argparse options, including short aliases.
 OPTIONS = {
     "init": "--auth --with-drive-scope --alert-minutes --stop-minutes --vps --webhook",
     "status": "--json", "watch": "--once --interval --alert-minutes --stop-minutes --gpu-threshold",
     "up": "-s --session --gpu --kaggle --colab --cpu --tpu --high-mem --std-mem --workers --no-drive --json",
     "exec": "-s --session -p --project -f --file --timeout --restart-kernel --json",
     "pull": "-p --project --dest --filename -s --session --json",
-    "down": "-s --session --all --json", "test-alert": "", "sync-remote": "",
+    "down": "-s --session --all --no-backup --json", "test-alert": "", "sync-remote": "",
     "models": "", "logs": "-s --session -n --lines --json",
 }
 

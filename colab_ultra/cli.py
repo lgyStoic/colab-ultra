@@ -205,6 +205,7 @@ def build_parser():
     p_down = sub.add_parser("down", help="安全备份输出至云盘并拉闸关机（含网页端孤儿实例），停止扣费")
     p_down.add_argument("-s", "--session", default=None, help="指定会话名或节点前缀")
     p_down.add_argument("--all", action="store_true", help="关闭账号下所有运行中的 Colab 机器")
+    p_down.add_argument("--no-backup", action="store_true", help="跳过产物回传并直接关机")
     p_down.add_argument("--json", action="store_true", help="以结构化 JSON 返回关机结果与剩余算力 (Agent 专用)")
 
     # test-alert
