@@ -1,6 +1,7 @@
 import argparse
 import fcntl
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
@@ -145,6 +146,61 @@ def _spin_up_single_session(colab_bin: str, session_name: str, args):
                 console.print(f"[yellow]⚠️ 自动挂载云盘遇到提示 ({session_name}): {e}[/yellow]")
 
 
+def _has_free_kaggle_gpu_quota(quota) -> bool:
+    if not isinstance(quota, dict):
+        return False
+    remaining = quota.get("gpu_remaining_hours") or 0.0
+    return (
+        isinstance(remaining, (int, float))
+        and remaining >= 0.5
+        and (quota.get("gpu_reserved_seconds") or 0.0) == 0.0
+    )
+
+
+def choose_kaggle_for_t4(
+    gpu_raw, *, force_colab, force_kaggle, is_cpu_or_tpu, high_mem, workers,
+    cfg, token_present, quota, now=None,
+) -> tuple[bool, str | None]:
+    """Decide whether to use Kaggle and return any routing message."""
+    if is_cpu_or_tpu:
+        return False, None
+    if force_kaggle or (not force_colab and is_kaggle_gpu_spec(gpu_raw)):
+        return True, None
+
+    is_t4 = gpu_raw.strip().upper() == "T4"
+    if force_colab:
+        if is_t4 and token_present and _has_free_kaggle_gpu_quota(quota) and not quota.get("error"):
+            return False, (
+                f"Kaggle 免费额度剩 {quota['gpu_remaining_hours']} 小时，"
+                "已按 --colab 强制使用付费 Colab T4（约 1.19 CU/h）"
+            )
+        return False, None
+
+    if not (is_t4 and not high_mem and workers == 1 and cfg.get("prefer_kaggle_for_t4", True) and token_present):
+        return False, None
+
+    if isinstance(quota, dict) and quota.get("error"):
+        cache = quota.get("cache")
+        if isinstance(cache, dict):
+            past_refresh = False
+            try:
+                now = now if now is not None else datetime.now(timezone.utc)
+                if now.tzinfo is None:
+                    now = now.replace(tzinfo=timezone.utc)
+                refresh = datetime.fromisoformat((cache.get("refresh_time") or "").replace("Z", "+00:00"))
+                if refresh.tzinfo is None:
+                    refresh = refresh.replace(tzinfo=timezone.utc)
+                past_refresh = now > refresh
+            except (AttributeError, TypeError, ValueError):
+                pass
+            if past_refresh or _has_free_kaggle_gpu_quota(cache):
+                fetched_at = cache.get("fetched_at") or "未知"
+                return True, f"Kaggle 额度接口失败，按本地缓存（{fetched_at}）尝试 Kaggle"
+        return False, f"Kaggle 额度接口失败（{quota['error']}），改用 Colab T4"
+
+    return _has_free_kaggle_gpu_quota(quota), None
+
+
 def cmd_up(args):
     """Spin up one or more sessions (Colab GPU/CPU/TPU or Free Kaggle Dual-T4), deploy probe, and initialize Drive workspace."""
     cfg = load_config()
@@ -156,21 +212,30 @@ def cmd_up(args):
     force_kaggle = bool(getattr(args, "kaggle", False))
     gpu_raw = (getattr(args, "gpu", None) or "T4").strip()
     is_cpu_or_tpu = bool(getattr(args, "cpu", False) or getattr(args, "tpu", None) or gpu_raw.upper() in ("CPU", "NONE", "OFF"))
+    high_mem = getattr(args, "high_mem", False)
+    kaggle_gpu_spec = is_kaggle_gpu_spec(gpu_raw)
 
-    use_kaggle = False
-    if not force_colab and not is_cpu_or_tpu:
-        if force_kaggle or is_kaggle_gpu_spec(gpu_raw):
-            use_kaggle = True
-        elif (
-            gpu_raw.upper() == "T4"
-            and not getattr(args, "high_mem", False)
-            and workers == 1
-            and cfg.get("prefer_kaggle_for_t4", True)
-            and load_kaggle_token()
-        ):
-            kq = get_kaggle_quota()
-            if (kq.get("gpu_remaining_hours") or 0.0) >= 0.5 and (kq.get("gpu_reserved_seconds") or 0.0) == 0.0:
-                use_kaggle = True
+    quota = None
+    token_present = False
+    if (
+        not is_cpu_or_tpu
+        and not force_kaggle
+        and not kaggle_gpu_spec
+        and gpu_raw.upper() == "T4"
+        and (force_colab or (not high_mem and workers == 1 and cfg.get("prefer_kaggle_for_t4", True)))
+    ):
+        token_present = bool(load_kaggle_token())
+        if token_present:
+            quota = get_kaggle_quota()
+
+    use_kaggle, route_msg = choose_kaggle_for_t4(
+        gpu_raw, force_colab=force_colab, force_kaggle=force_kaggle,
+        is_cpu_or_tpu=is_cpu_or_tpu, high_mem=high_mem, workers=workers,
+        cfg=cfg, token_present=token_present, quota=quota,
+    )
+    if route_msg:
+        warning_console = Console(stderr=True) if getattr(args, "json", False) else console
+        warning_console.print(f"[yellow]⚠️ {route_msg}[/yellow]")
 
     started_sessions = []
     if use_kaggle:
@@ -178,7 +243,7 @@ def cmd_up(args):
             try:
                 spin_up_kaggle_session(
                     session_name=s_name,
-                    gpu_choice=gpu_raw if is_kaggle_gpu_spec(gpu_raw) else "T4x2",
+                    gpu_choice=gpu_raw if kaggle_gpu_spec else "T4x2",
                     cfg=cfg,
                     probe_local_path=PROBE_LOCAL_PATH,
                     quiet=bool(getattr(args, "json", False)),
@@ -186,7 +251,7 @@ def cmd_up(args):
                 )
                 started_sessions.append(s_name)
             except Exception as e:
-                if not force_kaggle and not is_kaggle_gpu_spec(gpu_raw) and gpu_raw.upper() == "T4":
+                if not force_kaggle and not kaggle_gpu_spec and gpu_raw.upper() == "T4":
                     if not getattr(args, "json", False):
                         console.print(f"[yellow]⚠️ Kaggle 免费双卡暂不可用 ({e})，自动回退至 Colab T4...[/yellow]")
                     use_kaggle = False

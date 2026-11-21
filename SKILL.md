@@ -32,6 +32,7 @@ Run each command separately so the task log shows live progress.
 
 ## Hard Rules
 
+- Do not pass `--colab` for T4 jobs unless Kaggle is unavailable or out of quota, multiple workers or high-RAM are needed, or another Kaggle session is already running. Write outputs under `/content/drive/MyDrive/ColabUltra/<project>/runs/` and run via `exec -p <project>` so Kaggle mirrors the project and syncs `runs/` back to `~/ColabUltra/<project>/runs/`; inputs over 80 MB require `init --with-drive-scope` or an HF/URL download.
 - Run `up`, `exec` and `down` with live terminal output. Omit `--json`, pipes such as `| grep`, and shell chains. Use `--json` only on `status` when parsing its output.
 - Land multi-connection downloads (default `hf_transfer` c=64, or `aria2c` c=16) on local NVMe under `/content/` first. Then copy sequentially to `/content/drive/MyDrive/` with `cp` or `shutil.copy2`. Reject incomplete transfers and `.aria2` sidecars.
 - Copy Drive-cached binaries into `/tmp` and run `chmod +x` there. Drive FUSE does not preserve the execute bit.
