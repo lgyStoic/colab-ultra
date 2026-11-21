@@ -205,6 +205,17 @@ def test_recipe_dry_run(tmp_path, name, feature, env_flag):
     assert bad.returncode and "expected a prompt" in bad.stderr
 
 
+def test_template_dry_run(tmp_path):
+    code = tmp_path / "code"
+    code.mkdir()
+    cfg = {"run_name": "smoke", "prompts": [{"slug": "tile", "prompt": "a red kite"}]}
+    (code / "prompts.json").write_text(json.dumps(cfg))
+    cmd = [sys.executable, str(ROOT / "recipes" / "_template.py"), "--dry-run"]
+    result = subprocess.run(cmd, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "a red kite" in result.stdout and not (tmp_path / "runs").exists()
+
+
 def test_unchanged_workflows_import_legacy_names(tmp_path, monkeypatch):
     """Exercise the exec bootstrap without starting a heartbeat or a VM."""
     from colab_ultra.session import _job_source
