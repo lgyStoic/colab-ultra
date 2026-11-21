@@ -62,6 +62,9 @@ def plan(source, dest, *, backend="hf_transfer", concurrency=None, min_bytes=MIN
     if count < 1:
         raise ValueError("concurrency must be positive")
     on_drive = dest.is_relative_to(DRIVE.resolve())
+    if os.environ.get("COLAB_ULTRA_KAGGLE") == "1" and os.environ.get("DRIVE_ACCESS_TOKEN"):
+        # Kaggle's mirrored Drive tree is on local disk, so an atomic rename suffices.
+        on_drive = False
     return Plan(source, dest, backend, NVME if on_drive else dest.parent, on_drive,
                 min(count, 16) if backend == "aria2" else count, min_bytes, force)
 
@@ -147,8 +150,14 @@ def _download(item, temp):
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "hf_transfer"], check=True)
                 import hf_transfer
 
-        hf_transfer.download(url=url, filename=str(temp), max_files=item.concurrency, headers=headers,
-                             chunk_size=10 * 1024 * 1024, parallel_failures=min(3, item.concurrency - 1), max_retries=5)
+        try:
+            hf_transfer.download(url=url, filename=str(temp), max_files=item.concurrency, headers=headers,
+                                 chunk_size=10 * 1024 * 1024, parallel_failures=min(3, item.concurrency - 1), max_retries=5)
+        except Exception as exc:
+            # The native downloader reports HTTP transfer failures as plain Exceptions.
+            if expected is not None and os.environ.get("COLAB_ULTRA_KAGGLE") == "1":
+                raise OSError(f"Drive download failed for {item.dest}") from exc
+            raise
     if expected is not None and temp.stat().st_size != expected:
         raise IOError(f"Expected {expected} bytes for {item.dest}")
 

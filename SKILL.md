@@ -17,6 +17,10 @@ Run each command separately so the task log shows live progress.
 | `colab-ultra up -s prep --cpu --std-mem` | Allocate a low-cost CPU worker for preparation. Use `--cpu` for high-memory ETL or `--workers N` for multiple nodes. |
 | `colab-ultra up -s l4 --gpu L4` | Allocate a GPU. T4 can route to Kaggle's free dual-T4 when quota permits. Use `--colab` or `--kaggle` to select a provider. |
 | `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_diffsynth.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |
+| `colab-ultra logs -s NAME -n 100` | Read the latest exec log, including while the kernel is busy. Use `-n 0` for all lines. |
+| `colab-ultra models ls` | List local Drive variants, payload sizes and manifest status. |
+| `colab-ultra models verify MODEL/VARIANT` | Check filenames and sizes. Omit the target to check the entire library. |
+| `colab-ultra models rm MODEL/VARIANT` | Preview removal of one variant. Add `--yes` to delete it. |
 | `colab-ultra pull org/repo --dest models/my-model/gguf-q4 --filename weights.gguf` | Stage a repository, matching files or a URL through a temporary CPU worker. |
 | `colab-ultra down -s l4` | Back up outputs when configured, verify release and report remaining assignments and billing. |
 | `colab-ultra watch` | Monitor watts, GPU/CPU activity, disk I/O and task heartbeats. Defaults are 5 minutes to alert and 10 minutes to stop. |

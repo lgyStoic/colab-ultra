@@ -20,9 +20,11 @@ from colab_ultra.config import (
     save_config,
 )
 from colab_ultra.drive import detect_local_drive_hub
+from colab_ultra.models_cli import add_models_parser, cmd_models
 from colab_ultra.session import (
     cmd_down,
     cmd_exec,
+    cmd_logs,
     cmd_pull,
     cmd_up,
 )
@@ -209,6 +211,11 @@ def build_parser():
     sub.add_parser("test-alert", help="测试低负载多通道告警（Mac 系统通知 + 语音播报 + Webhook）")
 
     sub.add_parser("sync-remote", help="同步 cu_remote 运行库到本地 Google Drive")
+    add_models_parser(sub)
+    logs = sub.add_parser("logs", help="读取会话最近一次 exec 的远端日志")
+    logs.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra)")
+    logs.add_argument("-n", "--lines", type=int, default=100, help="显示最后 N 行，0 表示全部")
+    logs.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -233,6 +240,10 @@ def main(argv=None):
         cmd_up(args)
     elif args.cmd == "exec":
         cmd_exec(args)
+    elif args.cmd == "logs":
+        cmd_logs(args)
+    elif args.cmd == "models":
+        cmd_models(args)
     elif args.cmd == "pull":
         cmd_pull(args)
     elif args.cmd == "down":

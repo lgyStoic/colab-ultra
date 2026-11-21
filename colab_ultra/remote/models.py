@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import tempfile
 import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -104,6 +107,24 @@ def ensure(model, variant, files, *, to=None, revision="main") -> dict[str, Path
     vdir = variant_dir(model, variant)
     urls = _sources(files, revision)
     with _variant_locks[vdir]:
+        if os.environ.get("COLAB_ULTRA_KAGGLE") == "1" and os.environ.get("DRIVE_ACCESS_TOKEN"):
+            target = Path(to) if to is not None else vdir
+
+            def fetch(rel):
+                dest = target / rel
+                minimum = _minimum(rel)
+                if stage.valid(dest, minimum):
+                    return
+                source = f"drive://ColabUltra/models/{model}/{variant}/{rel}"
+                try:
+                    stage.run(stage.plan(source, dest, min_bytes=minimum, force=True))
+                except (ValueError, OSError, subprocess.CalledProcessError):
+                    # URLError is an OSError. Retry only the file that failed.
+                    stage.run(stage.plan(urls[rel], dest, min_bytes=minimum, force=True))
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(fetch, urls))
+            return {rel: target / rel for rel in files}
         manifest = read_manifest(vdir)
         entries = manifest["files"].copy()
         downloads = {}

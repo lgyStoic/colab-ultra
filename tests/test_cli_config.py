@@ -13,6 +13,7 @@ OPTIONS = {
     "exec": "-s --session -p --project -f --file --timeout --restart-kernel --json",
     "pull": "-p --project --dest --filename -s --session --json",
     "down": "-s --session --all --json", "test-alert": "", "sync-remote": "",
+    "models": "", "logs": "-s --session -n --lines --json",
 }
 
 
@@ -24,6 +25,11 @@ def test_help_parity():
         assert set(commands[name]._option_string_actions) == {"-h", "--help", *options.split()}
     assert parser.parse_args(["pull", "org/repo", "-p", "tiles"]).source == "org/repo"
     assert parser.parse_args(["exec", "print(1)"]).code == "print(1)"
+    for action in ("ls", "verify", "rm"):
+        args = parser.parse_args(["models", action, *(["demo/v1"] if action == "rm" else [])])
+        assert (args.cmd, args.action) == ("models", action)
+    logs = parser.parse_args(["logs"])
+    assert (logs.session, logs.lines, logs.json) == ("ultra", 100, False)
 
 
 def test_config(tmp_path):

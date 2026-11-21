@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from textwrap import indent
 
 from rich.console import Console
 
@@ -16,10 +17,11 @@ from colab_ultra.backends.colab import (
     assignments,
     backup_vm_outputs_to_drive,
     colab_state,
+    resolve_proxy,
     restart_vm_kernel,
     run_detached,
 )
-from colab_ultra.backends.jupyter import jupyter_exec_ws
+from colab_ultra.backends.jupyter import jupyter_exec_ws, jupyter_get_bytes
 from colab_ultra.backends.kaggle import (
     _load_kaggle_sessions,
     build_in_vm_sync_snippet,
@@ -346,21 +348,112 @@ def _resolve_exec_source(args, project_name: str | None) -> tuple[str, str]:
     return user_code, script_label
 
 
+# Embedded in each job so log capture also works before cu_remote is installed.
+_EXEC_LOG_CAPTURE = r"""
+from contextlib import contextmanager as _cu_contextmanager
+
+@_cu_contextmanager
+def _cu_capture_log(task):
+    import datetime
+    import tempfile
+    import traceback
+
+    path = os.path.realpath(os.environ.get("COLAB_ULTRA_EXEC_LOG", "/content/.cu_last_exec.log"))
+    log = None
+    try:
+        # An older detached job may still have its log open. Give this job a new inode.
+        if os.path.exists(path) and (not os.path.isfile(path) or not os.access(path, os.W_OK)):
+            raise OSError("Log path is not a writable file")
+        with tempfile.TemporaryDirectory(dir=os.path.dirname(path)) as work:
+            log = open(os.path.join(work, "log"), "w", encoding="utf-8", errors="backslashreplace")
+            os.replace(log.name, path)
+    except OSError:
+        if log is not None:
+            log.close()
+        yield
+        return
+
+    lock = threading.RLock()
+    at_line_start = True
+    def record(text):
+        nonlocal at_line_start
+        with lock:
+            try:
+                if not log.closed:
+                    log.write(text)
+                    log.flush()
+                    if text:
+                        at_line_start = text.endswith("\n")
+            except OSError:
+                pass
+
+    class _CuTee:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def write(self, text):
+            with lock:
+                count = self.stream.write(text)
+                record(text)
+                return count
+
+        def flush(self):
+            with lock:
+                self.stream.flush()
+                record("")
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+    def now():
+        return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    stdout, stderr = sys.stdout, sys.stderr
+    rc = 1
+    try:
+        record(f"[colab-ultra] started {now()} task={task}\n")
+        sys.stdout, sys.stderr = _CuTee(stdout), _CuTee(stderr)
+        yield
+        rc = 0
+    except SystemExit as error:
+        rc = int(error.code not in (None, 0))
+        raise
+    except BaseException as error:
+        if not at_line_start:
+            record("\n")
+        record("".join(traceback.format_exception(type(error), error, error.__traceback__.tb_next)))
+        raise
+    finally:
+        with lock:
+            sys.stdout, sys.stderr = stdout, stderr
+            if not at_line_start:
+                record("\n")
+            record(f"[colab-ultra] finished {now()} task={task} rc={rc}\n")
+            try:
+                log.close()
+            except OSError:
+                pass
+"""
+
+
 def _job_source(user_code, script_label, task_label, prelude, pack=False):
-    """Wrap a script with an execution heartbeat and optional Kaggle output sync."""
-    return f"""import gc, json, os, subprocess, sys, threading, time
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-os.environ.setdefault("PYTHONUNBUFFERED", "1")
-{prelude}
-_scripts = "/content/drive/MyDrive/ColabUltra/scripts"
+    """Wrap a script with a last-exec log, heartbeat and optional Kaggle sync."""
+    aliases = """_scripts = "/content/drive/MyDrive/ColabUltra/scripts"
 if os.path.isfile(os.path.join(_scripts, "cu_remote", "__init__.py")):
     if _scripts not in sys.path:
         sys.path.insert(0, _scripts)
     from cu_remote import stage, vram_policy
     sys.modules.setdefault("fast_stage_nvme", stage)
     sys.modules.setdefault("vram_policy", vram_policy)
-
+"""
+    # Kaggle materializes cu_remote in its prelude before installing the aliases.
+    bootstrap = prelude + "\n" + aliases if prelude else ""
+    return f"""import gc, json, os, subprocess, sys, threading, time
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+{aliases if not prelude else ""}
 _hb_stop = threading.Event()
+{_EXEC_LOG_CAPTURE}
 _hb_file = "/content/.task_heartbeat.json"
 def _hb_loop():
     probe = "/content/.colab_probe.py"
@@ -377,17 +470,26 @@ def _hb_loop():
         except Exception:
             pass
         _hb_stop.wait(15)
-threading.Thread(target=_hb_loop, daemon=True).start()
-try:
-    exec(compile({user_code!r}, {script_label!r}, "exec"), globals())
-finally:
-    _hb_stop.set()
+with _cu_capture_log({task_label!r}):
     try:
-        if {pack!r}:
-            _cu_pack_runs(final=True)
+{indent(bootstrap, "        ")}
+        _hb_thread = threading.Thread(target=_hb_loop, daemon=True)
+        _hb_thread.start()
+        try:
+            exec(compile({user_code!r}, {script_label!r}, "exec"), globals())
+        finally:
+            _hb_stop.set()
+            _hb_thread.join()
+            try:
+                if {pack!r}:
+                    _cu_pack_runs(final=True)
+            finally:
+                if os.path.exists(_hb_file):
+                    os.remove(_hb_file)
     finally:
-        if os.path.exists(_hb_file):
-            os.remove(_hb_file)
+        if {pack!r}:
+            os.environ.pop("DRIVE_ACCESS_TOKEN", None)
+            globals().pop("_cu_drive_tok", None)
 """
 
 
@@ -426,7 +528,10 @@ def cmd_exec(args):
 
         drive_tok = get_short_lived_drive_token()
         kaggle_sync_defs = build_in_vm_sync_snippet(project_name, drive_tok)
-        prelude = (
+        kaggle_env = 'os.environ["COLAB_ULTRA_KAGGLE"] = "1"\n'
+        if drive_tok:
+            kaggle_env += f'os.environ["DRIVE_ACCESS_TOKEN"] = {drive_tok!r}\n'
+        prelude = kaggle_env + (
             "for _a in ('last_traceback', 'last_value', 'last_type', 'last_exc'):\n"
             "    if hasattr(sys, _a):\n"
             "        try: delattr(sys, _a)\n"
@@ -463,6 +568,53 @@ def cmd_exec(args):
     t0 = time.time()
     ret_code, out_str, err_str = run_detached(args, wrapped_code)
     _exec_result(args, t0, ret_code, out_str, err_str)
+
+
+def cmd_logs(args):
+    """Read the latest job's output without executing code in the kernel."""
+    if args.lines < 0:
+        raise SystemExit("--lines must be zero or greater")
+    k_sess = _load_kaggle_sessions().get(args.session)
+    if k_sess is not None:
+        provider = "kaggle"
+        url, token = k_sess.get("proxy_url"), ""
+    else:
+        provider = "colab"
+        url, token = resolve_proxy(args.session)
+
+    raw = heartbeat = None
+    if url:
+        raw = jupyter_get_bytes(url, token, "/content/.cu_last_exec.log")
+        heartbeat = jupyter_get_bytes(url, token, "/content/.task_heartbeat.json")
+    if k_sess is not None and raw is None and heartbeat is None:
+        try:
+            active = kaggle_active(k_sess)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Cannot reach Kaggle session {args.session}. Run colab-ultra status.") from exc
+        if not active:
+            raise SystemExit(f"Lost Kaggle session {args.session}. Run colab-ultra status.")
+        if not url:
+            raise SystemExit(f"Kaggle session {args.session} has no proxy URL. Run colab-ultra status.")
+
+    try:
+        hb = json.loads(heartbeat) if heartbeat else None
+    except ValueError:
+        hb = None  # The heartbeat may be in the middle of a write.
+    if not isinstance(hb, dict):
+        hb = None
+    lines = (raw or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
+    tail = "".join(lines[-args.lines:] if args.lines else lines)
+    if args.json:
+        print(json.dumps({"ok": True, "session": args.session, "provider": provider,
+                          "active_task": hb, "exists": raw is not None,
+                          "lines_total": len(lines), "log": tail}, ensure_ascii=False))
+    else:
+        if hb:
+            print(f"Active task: {hb.get('task', args.session)}")
+        if raw is None:
+            print(f"No exec log yet for {args.session}.")
+        elif tail:
+            print(tail, end="" if tail.endswith("\n") else "\n")
 
 
 def _exec_result(args, t0, ret_code, out_str, err_str):

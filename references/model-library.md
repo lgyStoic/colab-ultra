@@ -33,7 +33,9 @@ paths = models.ensure("minimax-h3-image", "bf16", files, to=local)
 vae_path = paths[name]
 ```
 
-`describe` prints the transfer plan offline. `ensure` takes HF or HTTP(S) file URLs and returns a dictionary keyed by relative filename. Omitting `to` returns the library paths. A missing file or size mismatch triggers a download. Reuse requires a nonempty file matching its manifest byte count. Choose a new variant when changing the underlying weights. The optional `revision` selects the HF revision for `hf://` URLs. A resolve URL carries its own revision.
+`describe` prints the transfer plan offline. `ensure` takes HF or HTTP(S) file URLs and returns a dictionary keyed by relative filename. On Colab, omitting `to` returns the library paths. A missing file or size mismatch triggers a download. Reuse requires a nonempty file matching its manifest byte count. Choose a new variant when changing the underlying weights. The optional `revision` selects the HF revision for `hf://` URLs. A resolve URL carries its own revision.
+
+On Kaggle with Drive access (`colab-ultra init --with-drive-scope`), `ensure` reuses valid VM-local files first. For each remaining file it tries the shared library via the Drive API, then falls back to the supplied HF/HTTP source if that transfer fails. Both routes write to the same local destination. Omitting `to` uses the variant directory in Kaggle's local mirror.
 
 Each variant has one `manifest.json`. This example shows the observed MiniMax release VAE size after migration.
 
@@ -52,6 +54,16 @@ Each variant has one `manifest.json`. This example shows the observed MiniMax re
 ```
 
 Migrated files acquire a source URL when a recipe first requests them. When available, the SHA-256 comes from Hugging Face LFS metadata. An unavailable digest stays `null`. A size match does not verify the file contents.
+
+## Inspect the local library
+
+```bash
+colab-ultra models ls --json
+colab-ultra models verify minimax-h3-image/bf16
+colab-ultra models rm minimax-h3-image/bf16
+```
+
+`ls` reports payload counts, sizes and manifest status. `verify` checks names and byte counts using file metadata and exits with code 1 on any issue. Omit the target to verify all variants. `rm` previews the file count and size; add `--yes` to delete that variant from the synced library. All three accept `--hub PATH` pointing to a ColabUltra directory.
 
 ## Prefetch from the CLI
 
