@@ -33,6 +33,7 @@ class Plan:
     copy_to_drive: bool
     concurrency: int
     min_bytes: int
+    force: bool = False
 
 
 def hf_url(repo, filename, revision="main"):
@@ -40,7 +41,7 @@ def hf_url(repo, filename, revision="main"):
     return f"https://huggingface.co/{repo}/resolve/{quote(revision, safe='')}/{quote(filename)}"
 
 
-def plan(source, dest, *, backend="hf_transfer", concurrency=None, min_bytes=MIN_BYTES):
+def plan(source, dest, *, backend="hf_transfer", concurrency=None, min_bytes=MIN_BYTES, force=False):
     """Resolve a file source and choose the local download and publication paths."""
     dest = Path(dest).resolve()
     source = str(source)
@@ -62,7 +63,7 @@ def plan(source, dest, *, backend="hf_transfer", concurrency=None, min_bytes=MIN
         raise ValueError("concurrency must be positive")
     on_drive = dest.is_relative_to(DRIVE.resolve())
     return Plan(source, dest, backend, NVME if on_drive else dest.parent, on_drive,
-                min(count, 16) if backend == "aria2" else count, min_bytes)
+                min(count, 16) if backend == "aria2" else count, min_bytes, force)
 
 
 def valid(path, min_bytes=MIN_BYTES):
@@ -156,7 +157,7 @@ def run(item):
     """Stage one plan, with sequential Drive writes and no reusable partial output."""
     dest = item.dest
     marker = Path(f"{dest}.aria2")
-    if valid(dest, item.min_bytes):
+    if not item.force and valid(dest, item.min_bytes):
         return dest
     if marker.exists():
         dest.unlink(missing_ok=True)

@@ -18,10 +18,7 @@ HUB_ROOT = "/content/drive/MyDrive/ColabUltra"
 DIRS = [
     "scripts",             # 跨项目公共脚本 (fast_stage_nvme.py, vram_policy.py)
     "bin/aria2_debs",      # aria2 离线 Ubuntu .deb 缓存 (~1s 极速安装)
-    "models/llm",          # 大语言模型持久化权重 (运行时请通过 fast_stage_nvme.py 拉至本地 NVMe)
-    "models/checkpoints",  # 生图/生视频基础大模型
-    "models/loras",        # LoRA 微调权重
-    "models/vae_clip",     # VAE / Text Encoder 组件
+    "models",              # 共享模型目录：models/<model>/<variant>/
     "datasets",            # 训练与微调数据集
     "outputs/images",      # AI 生图输出永久归档
     "outputs/videos",      # AI 生视频输出永久归档

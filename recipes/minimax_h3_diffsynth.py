@@ -44,13 +44,13 @@ from pathlib import Path
 
 sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
 try:
-    from cu_remote import recipe, stage, vram_policy
+    from cu_remote import models, recipe, vram_policy
 except ModuleNotFoundError as exc:
     if exc.name != "cu_remote":
         raise
     # Source checkout for offline dry runs.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from colab_ultra.remote import recipe, stage, vram_policy
+    from colab_ultra.remote import models, recipe, vram_policy
 
 PROCESSOR_FILES = (
     "chat_template.json",
@@ -116,69 +116,33 @@ def main() -> None:
     staging_err: list[Exception] = []
     stage_elapsed = [0.0]
 
-    vae_hf_entry = (
-        (
-            "DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models",
-            "vae_int8.safetensors",
-            "https://huggingface.co/DiffSynth-Studio/MiniMax-H3-Image-EntroPack/resolve/main/models/vae_int8.safetensors",
-        )
-        if use_vae_int8
-        else (
-            "MiniMax/MiniMax-H3-Image/vae",
-            "diffusion_pytorch_model.safetensors",
-            "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/resolve/main/vae/diffusion_pytorch_model.safetensors",
-        )
-    )
-
-    # Prefer HF GCP CDN for all public weights + processor (270-450 MB/s, zero project coupling)
+    base = "hf://MiniMaxAI/MiniMax-H3-Image"
+    entropack = "hf://DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models"
+    prequants = "hf://DiffSynth-Studio/EntroPackPreQuants/models/MiniMax-H3"
     dit_file = "bf16_table_pruned" if dit_nf4 else dit_variant
-    hf_urls = [
-        (
-            "DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models",
-            f"{dit_file}.safetensors",
-            f"https://huggingface.co/DiffSynth-Studio/MiniMax-H3-Image-EntroPack/resolve/main/models/{dit_file}.safetensors",
-        ),
-        (
-            "DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models",
-            f"{dit_file}.json",
-            f"https://huggingface.co/DiffSynth-Studio/MiniMax-H3-Image-EntroPack/resolve/main/models/{dit_file}.json",
-        ),
-        vae_hf_entry,
-        (
-            "MiniMax/MiniMax-H3-Image",
-            "pdd_fused_heads.safetensors",
-            "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/resolve/main/pdd_fused_heads.safetensors",
-        ),
-        (
-            "DiffSynth-Studio/EntroPackPreQuants/models/MiniMax-H3",
-            "text_encoder_4bpp.safetensors",
-            "https://huggingface.co/DiffSynth-Studio/EntroPackPreQuants/resolve/main/models/MiniMax-H3/text_encoder_4bpp.safetensors",
-        ),
-        (
-            "DiffSynth-Studio/EntroPackPreQuants/models/MiniMax-H3",
-            "text_encoder_4bpp.json",
-            "https://huggingface.co/DiffSynth-Studio/EntroPackPreQuants/resolve/main/models/MiniMax-H3/text_encoder_4bpp.json",
-        ),
-    ] + [
-        (
-            "MiniMax/MiniMax-H3-Image/processor",
-            fname,
-            f"https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/resolve/main/processor/{fname}",
-        )
-        for fname in PROCESSOR_FILES
-    ]
+    dit_key = f"{dit_file}.safetensors"
+    dit_group = "bf16" if dit_nf4 else f"entropack-{dit_variant}"
+    vae_key = "vae_int8.safetensors" if use_vae_int8 else "vae/diffusion_pytorch_model.safetensors"
+    vae_group = "entropack-vae-int8" if use_vae_int8 else "bf16"
+    image = "minimax-h3-image"
+    encoder = "minimax-h3-qwen3vl-32b"
+    groups = {
+        (image, "bf16"): {key: f"{base}/{key}" for key in
+                          ["pdd_fused_heads.safetensors", *(f"processor/{name}" for name in PROCESSOR_FILES)]},
+        (encoder, "entropack-4bpp"): {key: f"{prequants}/{key}" for key in
+                                      ("text_encoder_4bpp.safetensors", "text_encoder_4bpp.json")},
+    }
+    dit_files = groups.setdefault((image, dit_group), {})
+    dit_files[dit_key] = f"{entropack}/{dit_key}"
+    if not dit_nf4:
+        dit_files[f"{dit_file}.json"] = f"{entropack}/{dit_file}.json"
+    groups.setdefault((image, vae_group), {})[vae_key] = f"{entropack if use_vae_int8 else base}/{vae_key}"
 
-    if dit_nf4:
-        hf_urls = [u for u in hf_urls if u[1] != f"{dit_file}.json"]  # bf16 DiT has no EntroPack sidecar
-
-    plans = [stage.plan(url, nvme_root / folder / name,
-                        min_bytes=stage.MIN_BYTES if name.endswith(".safetensors") else 0)
-             for folder, name, url in hf_urls]
     if recipe.dry_run():
         recipe.describe(cfg, run_name)
         print("git clone -b", diffsynth_branch, diffsynth_repo)
-        for item in plans:
-            print(item.backend, item.source, "->", item.dest)
+        for (model, variant), files in groups.items():
+            models.describe(model, variant, files, to=nvme_root / model / variant)
         print(f"MiniMaxH3ImagePipeline: vae_fp32={vae_fp32} dit_nf4={dit_nf4} -> {out_dir}")
         return
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +168,8 @@ def main() -> None:
     def _bg_stage() -> None:
         try:
             t_s = time.time()
-            stage.run_many(plans)
+            for (model, variant), files in groups.items():
+                models.ensure(model, variant, files, to=nvme_root / model / variant)
             stage_elapsed[0] = time.time() - t_s
         except Exception as exc:
             staging_err.append(exc)
@@ -281,15 +246,11 @@ def main() -> None:
     )
     from PIL import Image
     from tqdm import tqdm
-    dit_path = nvme_root / f"DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models/{dit_file}.safetensors"
-    te_path = nvme_root / "DiffSynth-Studio/EntroPackPreQuants/models/MiniMax-H3/text_encoder_4bpp.safetensors"
-    pdd_path = nvme_root / "MiniMax/MiniMax-H3-Image/pdd_fused_heads.safetensors"
-    vae_path = (
-        nvme_root / "DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models/vae_int8.safetensors"
-        if use_vae_int8
-        else nvme_root / "MiniMax/MiniMax-H3-Image/vae/diffusion_pytorch_model.safetensors"
-    )
-    proc_dir = nvme_root / "MiniMax/MiniMax-H3-Image/processor"
+    dit_path = nvme_root / image / dit_group / dit_key
+    te_path = nvme_root / encoder / "entropack-4bpp/text_encoder_4bpp.safetensors"
+    pdd_path = nvme_root / image / "bf16/pdd_fused_heads.safetensors"
+    vae_path = nvme_root / image / vae_group / vae_key
+    proc_dir = nvme_root / image / "bf16/processor"
 
     comp_sizes_gb = {
         "dit": (11.5 if dit_nf4 else dit_path.stat().st_size / (1024 ** 3)),  # NF4 resident size ~11.5 GiB
@@ -449,7 +410,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"[Warn] pipe.compile failed ({exc}), running eager", flush=True)
 
-        models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
+        iteration_models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
         for idx, (slug, s_cpu, p_cpu, n_cpu) in enumerate(prepared, start=1):
             t_d = time.time()
             pipe.scheduler.set_timesteps(6, distilled=True)
@@ -464,7 +425,7 @@ def main() -> None:
                     inputs_shared,
                     inputs_posi,
                     inputs_nega,
-                    **models,
+                    **iteration_models,
                     timestep=timestep,
                 )
                 inputs_shared["latents"] = pipe.step(

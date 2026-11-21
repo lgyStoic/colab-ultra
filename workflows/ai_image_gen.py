@@ -45,7 +45,7 @@ def main() -> None:
             stage_dual_channel(
                 dest_root=nvme_root,
                 drive_files=[
-                    # ("subdir", "ColabUltra/<project>/models/<path_to_private_or_lora.safetensors>"),
+                    # ("subdir", "ColabUltra/models/<model>/<variant>/lora.safetensors"),
                 ],
                 hf_urls=[
                     # ("subdir", "model.safetensors", "https://huggingface.co/<org>/<repo>/resolve/main/<file>"),

@@ -3,8 +3,10 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .drive import scripts_target
+from .remote import models
 
 
 RUNTIME = Path(__file__).parent / "remote"
@@ -36,6 +38,9 @@ def sync_remote(hub=None):
     target = scripts / "cu_remote"
     target.mkdir(parents=True, exist_ok=True)
     files = runtime_files()
+    required = {"__init__.py", "stage.py", "vram_policy.py", "models.py"}
+    if not required.issubset(p.relative_to(source).as_posix() for p in files):
+        raise FileNotFoundError(f"Incomplete runtime in {source}")
     with tempfile.TemporaryDirectory(dir=scripts) as temp:
         for src in files:
             dest = target / src.relative_to(source)
@@ -45,36 +50,68 @@ def sync_remote(hub=None):
             staged = Path(temp) / src.name
             shutil.copyfile(src, staged)
             staged.replace(dest)
-    for name in ("__init__.py", "stage.py", "vram_policy.py"):
-        if not filecmp.cmp(source / name, target / name, shallow=False):
-            raise IOError(f"Drive sync verification failed: {target / name}")
+    for src in files:
+        dest = target / src.relative_to(source)
+        if not filecmp.cmp(src, dest, shallow=False):
+            raise IOError(f"Drive sync verification failed: {dest}")
     for name in ("fast_stage_nvme.py", "vram_policy.py"):
         (scripts / name).unlink(missing_ok=True)
     return target
 
 
-def pull_code(source, project, dest, filename=None):
-    """Generate a remote pull with the same staging rules as GPU recipes."""
+def pull_code(source, project=None, dest="models", filename=None):
+    """Resolve the destination before allocating a worker, then generate its transfer code."""
+    if project is not None:
+        models.check_relative(project)
+        # Legacy project pulls also accept directory spellings such as "." and "models/".
+        if Path(dest).is_absolute() or ".." in Path(dest).parts:
+            raise ValueError(f"Expected a project-relative destination: {dest!r}")
+    else:
+        models.check_relative(dest)
+    if filename is not None:
+        models.check_relative(filename)
+
+    parts = Path(dest).parts
+    shared = project is None and parts[:1] == ("models",)
+    if shared:
+        if len(parts) < 3:
+            raise ValueError("--dest must include models/<model>/<variant> for a shared model")
+        models.variant_dir(parts[1], parts[2])
+    target = Path("/content/drive/MyDrive/ColabUltra") / (project or "") / dest
+    if "://" in source or source.startswith("/content/drive/"):
+        name = filename or Path(urlsplit(source).path).name
+        models.check_relative(name)
+        if shared and urlsplit(source).scheme not in {"hf", "http", "https"}:
+            raise ValueError("Shared models require an HF or HTTP(S) file URL")
+        transfer = f"plans = [stage.plan(source, target / {name!r}, min_bytes=0)]"
+    else:
+        transfer = """
+try:
+    import huggingface_hub
+except ImportError:
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "huggingface_hub"], check=True)
+plans = stage.repo_plans(source, filename or "*", target, min_bytes=0)
+"""
+    publish = "stage.run_many(plans)"
+    if shared:
+        publish = f"""
+from cu_remote import models
+vdir = models.variant_dir({parts[1]!r}, {parts[2]!r})
+files = {{p.dest.relative_to(vdir.resolve()).as_posix(): p.source for p in plans}}
+models.ensure({parts[1]!r}, {parts[2]!r}, files)
+"""
     return f"""
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
 from cu_remote import stage
-target = Path("/content/drive/MyDrive/ColabUltra") / {project!r} / {dest!r}
+target = Path({str(target)!r})
 source = {source!r}
 filename = {filename!r}
-if "://" in source or source.startswith("/content/drive/"):
-    name = filename or Path(urlsplit(source).path).name
-    stage.run(stage.plan(source, target / name, min_bytes=0))
-else:
-    try:
-        import huggingface_hub
-    except ImportError:
-        import subprocess
-        subprocess.run([sys.executable, "-m", "pip", "install", "huggingface_hub"], check=True)
-    stage.run_many(stage.repo_plans(source, filename or "*", target, min_bytes=0))
+{transfer}
+{publish}
 import time
 os.sync()
 def _tx_bytes():

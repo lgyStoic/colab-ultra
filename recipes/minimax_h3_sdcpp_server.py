@@ -22,26 +22,27 @@ from pathlib import Path
 
 sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
 try:
-    from cu_remote import bg, binaries, recipe, stage
+    from cu_remote import bg, binaries, models, recipe
 except ModuleNotFoundError as exc:
     if exc.name != "cu_remote":
         raise
     # Source checkout for offline dry runs.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from colab_ultra.remote import bg, binaries, recipe, stage
+    from colab_ultra.remote import bg, binaries, models, recipe
 
 DRIVE = Path("/content/drive/MyDrive/ColabUltra")
 BIN_DIR = DRIVE / "bin" / "sdcpp"
 MODELS = Path("/content/models/h3gguf")
 
 DIT_NAME = os.environ.get("H3_DIT_GGUF", "minimax_h3_image_pruned-UD-Q4_K_XL.gguf")
-FILES = {
-    "dit": (MODELS / DIT_NAME, f"https://huggingface.co/unsloth/MiniMax-H3-Image-GGUF/resolve/main/{DIT_NAME}"),
-    "vae": (MODELS / "diffusion_pytorch_model.safetensors",
-            "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/resolve/main/vae/diffusion_pytorch_model.safetensors"),
-    "llm": (MODELS / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-            "https://huggingface.co/unsloth/MiniMax-H3-GGUF/resolve/main/qwen3vl_32b_minimax_h3-Q4_K_M.gguf"),
-}
+DIT_VARIANT = "gguf-" + Path(DIT_NAME).stem.removeprefix("minimax_h3_image_pruned-").lower()
+LLM_NAME = "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"
+VAE_NAME = "vae/diffusion_pytorch_model.safetensors"
+LIBRARY_FILES = [
+    ("minimax-h3-image", DIT_VARIANT, {DIT_NAME: f"hf://unsloth/MiniMax-H3-Image-GGUF/{DIT_NAME}"}),
+    ("minimax-h3-image", "bf16", {VAE_NAME: f"hf://MiniMaxAI/MiniMax-H3-Image/{VAE_NAME}"}),
+    ("minimax-h3-qwen3vl-32b", "gguf-q4_k_m", {LLM_NAME: f"hf://unsloth/MiniMax-H3-GGUF/{LLM_NAME}"}),
+]
 
 
 def build_binaries():
@@ -98,18 +99,17 @@ def main() -> None:
     use_sage = bool(cfg.get("sage_attn", True))
     srv_cmd = [
         "/tmp/sd-server", "--listen-port", str(port),
-        "--diffusion-model", str(FILES["dit"][0]), "--vae", str(FILES["vae"][0]), "--llm", str(FILES["llm"][0]),
+        "--diffusion-model", str(MODELS / DIT_NAME), "--vae", str(MODELS / VAE_NAME), "--llm", str(MODELS / LLM_NAME),
         "--cfg-scale", "1.0", "--steps", "6", "--sampling-method", "euler", "--sigmas", "minimax-h3-image",
         "--rng", "cpu", "--max-vram", max_vram, "-v",
     ]
     if use_sage:
         srv_cmd.append("--sage-attn")
 
-    plans = [stage.plan(url, path) for path, url in FILES.values()]
     if recipe.dry_run():
         recipe.describe(cfg, run_name)
-        for item in plans:
-            print(item.backend, item.source, "->", item.dest)
+        for model, variant, files in LIBRARY_FILES:
+            models.describe(model, variant, files, to=MODELS)
         print(" ".join(srv_cmd))
         for _, _, slug, fmt, dst in todo:
             print(f"POST /v1/images/edits {slug} -> {dst} ({fmt})")
@@ -118,10 +118,12 @@ def main() -> None:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        staged = pool.submit(stage.run_many, plans)
+    with ThreadPoolExecutor(max_workers=len(LIBRARY_FILES)) as pool:
+        staged = [pool.submit(models.ensure, model, variant, files, to=MODELS)
+                  for model, variant, files in LIBRARY_FILES]
         srv_cmd[0] = str(binaries.ensure_binary("sd-server", BIN_DIR, build_binaries))
-        staged.result()
+        for future in staged:
+            future.result()
 
     print(f"[Server] starting: {' '.join(srv_cmd)}", flush=True)
     srv_log = open("/content/sd_server.log", "w")

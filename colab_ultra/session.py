@@ -544,6 +544,11 @@ def cmd_pull(args):
     dest_dir = getattr(args, "dest", "models") or "models"
     filename = getattr(args, "filename", None)
 
+    try:
+        dl_code = pull_code(source, project, dest_dir, filename)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     console.print(f"🚀 [cyan]正在启动云端 CPU 节点 ({session})，走 Google Cloud 内网高速下载至 Drive，不消耗本地带宽...[/cyan]")
     up_args = argparse.Namespace(
         session=session,
@@ -560,7 +565,6 @@ def cmd_pull(args):
     )
     cmd_up(up_args)
 
-    dl_code = pull_code(source, project, dest_dir, filename)
     exec_args = argparse.Namespace(
         session=session,
         project=project,

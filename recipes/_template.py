@@ -4,17 +4,17 @@ from pathlib import Path
 
 sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
 try:
-    from cu_remote import recipe, stage
+    from cu_remote import models, recipe
 except ModuleNotFoundError as exc:
     if exc.name != "cu_remote":
         raise
     # Source checkout for offline dry runs.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from colab_ultra.remote import recipe, stage
+    from colab_ultra.remote import models, recipe
 
 MODEL_DIR = Path("/content/models/custom")
 MODELS = [
-    # ("hf://org/repo/model.safetensors", "model.safetensors"),
+    # ("my-model", "bf16", {"model.safetensors": "hf://org/repo/model.safetensors"}),
 ]
 
 
@@ -27,14 +27,13 @@ def main():
     """Validate prompts, stage configured weights, and run inference per tile."""
     cfg, code, root = recipe.load_project()
     run_name = cfg.get("run_name", root.name)
-    plans = [stage.plan(src, MODEL_DIR / dest) for src, dest in MODELS]
     if recipe.dry_run():
         recipe.describe(cfg, run_name)
-        for plan in plans:
-            print(f"stage: {plan.source} -> {plan.dest} ({plan.backend}, c={plan.concurrency})")
+        for model, variant, files in MODELS:
+            models.describe(model, variant, files, to=MODEL_DIR / model / variant)
         return
-    if plans:
-        stage.run_many(plans)
+    for model, variant, files in MODELS:
+        models.ensure(model, variant, files, to=MODEL_DIR / model / variant)
     out = root / "runs" / run_name
     out.mkdir(parents=True, exist_ok=True)
     for idx, item in enumerate(cfg["prompts"], 1):

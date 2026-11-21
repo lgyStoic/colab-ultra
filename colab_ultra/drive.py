@@ -8,7 +8,7 @@ from colab_ultra.backends.jupyter import jupyter_exec_ws
 from colab_ultra.retry import retry
 
 
-def detect_local_drive_hub() -> str | None:
+def detect_local_drive_hub(*, create=True) -> str | None:
     """Detect macOS Google Drive for Desktop mount (FileProvider) and maintain ~/ColabUltra symlink."""
     import glob as _glob
 
@@ -26,6 +26,8 @@ def detect_local_drive_hub() -> str | None:
     if not candidates:
         return None
     hub = os.path.join(candidates[0], "ColabUltra")
+    if not create:
+        return hub if os.path.isdir(hub) else None
     try:
         os.makedirs(hub, exist_ok=True)
         shortcut = os.path.expanduser("~/ColabUltra")

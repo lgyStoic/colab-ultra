@@ -671,7 +671,7 @@ elif os.path.isdir('/content'):
 else:
     os.symlink(kw, '/content')
 hub = '/content/drive/MyDrive/ColabUltra'
-for sub in ('models/llm', 'models/checkpoints', 'datasets', 'outputs/images', 'outputs/training', 'hf_cache', 'torch_cache', 'pip_cache', 'workspace', 'emergency_backups'):
+for sub in ('models', 'datasets', 'outputs/images', 'outputs/training', 'hf_cache', 'torch_cache', 'pip_cache', 'workspace', 'emergency_backups'):
     os.makedirs(f'{hub}/{sub}', exist_ok=True)
 for lk, tg in (('workspace', f'{hub}/workspace'), ('outputs', f'{hub}/outputs')):
     lp = f'/content/{lk}'

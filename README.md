@@ -34,7 +34,7 @@ colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_sdcpp_server.py --timeout 
 colab-ultra down -s l4
 ```
 
-`watch` 根据功耗、CPU、I/O 和心跳发出告警或释放空闲机器。`pull` 使用临时 CPU 节点下载模型到项目目录。`colab-ultra --help` 和各子命令的 `--help` 列出完整选项。用法、计费和下载注意事项见 [SKILL.md](SKILL.md)。
+`watch` 根据功耗、CPU、I/O 和心跳发出告警或释放空闲机器。`pull` 使用临时 CPU 节点下载文件到 Drive。共享模型用 `--dest models/<model>/<variant>`，项目专用文件用 `-p <project>`。`colab-ultra --help` 和各子命令的 `--help` 列出完整选项。用法、计费和下载注意事项见 [SKILL.md](SKILL.md)。
 
 ## 目录
 
@@ -50,4 +50,4 @@ colab-ultra down -s l4
 | `workflows/` | 环境检查、Drive 初始化、图像生成和 CPU 数据处理脚本 |
 | `tests/` | 离线测试，使用模拟的网络、进程和会话 |
 
-项目代码、模型、输入和输出分别放在项目的 `code/`、`models/`、`data/` 和 `runs/` 下。详见 [recipe 使用说明](recipes/README.md) 和 [VM 暂存与测速示例](references/fast-nvme-staging.md)。
+共享权重放在 `~/ColabUltra/models/<model>/<variant>/`，每个版本用 `manifest.json` 记录文件来源和大小。项目代码、输入和输出分别放在项目的 `code/`、`data/` 和 `runs/` 下。旧目录的迁移方法见[共享模型库](references/model-library.md)。详见 [recipe 使用说明](recipes/README.md) 和 [VM 暂存与测速示例](references/fast-nvme-staging.md)。

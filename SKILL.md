@@ -17,14 +17,15 @@ Run each command separately so the task log shows live progress.
 | `colab-ultra up -s prep --cpu --std-mem` | Allocate a low-cost CPU worker for preparation. Use `--cpu` for high-memory ETL or `--workers N` for multiple nodes. |
 | `colab-ultra up -s l4 --gpu L4` | Allocate a GPU. T4 can route to Kaggle's free dual-T4 when quota permits. Use `--colab` or `--kaggle` to select a provider. |
 | `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_diffsynth.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |
-| `colab-ultra pull org/repo -p tiles --filename weights.gguf` | Stage a repository, matching files or a URL through a temporary CPU worker. |
+| `colab-ultra pull org/repo --dest models/my-model/gguf-q4 --filename weights.gguf` | Stage a repository, matching files or a URL through a temporary CPU worker. |
 | `colab-ultra down -s l4` | Back up outputs when configured, verify release and report remaining assignments and billing. |
 | `colab-ultra watch` | Monitor watts, GPU/CPU activity, disk I/O and task heartbeats. Defaults are 5 minutes to alert and 10 minutes to stop. |
 | `colab-ultra test-alert` | Exercise the configured notification, voice and webhook channels. |
 
 ## Directory Layout
 
-- `~/ColabUltra/<project>/{code,models,data,runs}/` maps to `/content/drive/MyDrive/ColabUltra/<project>/` on Colab. Kaggle mirrors the project and syncs outputs.
+- `~/ColabUltra/models/<model>/<variant>/` holds shared weights, sidecars and a per-variant manifest. Recipes use `cu_remote.models.ensure()` to stage a variant on VM-local storage. See the [model library guide](references/model-library.md).
+- Project files under `~/ColabUltra/<project>/` map to `/content/drive/MyDrive/ColabUltra/<project>/` on Colab. Use `code/`, `data/` and `runs/` for scripts, inputs and results. Project-scoped pulls still support `models/`. Kaggle mirrors the project and syncs outputs.
 - `recipes/` contains standalone inference scripts. Prepare `code/prompts.json` and validate it with a local dry run before allocating a GPU. See the [recipe contract](recipes/README.md).
 - `colab_ultra/remote/` is the source for the VM package `cu_remote`. It contains staging, binary caching, image encoding and VRAM policy. The [staging guide](references/fast-nvme-staging.md) includes a benchmark example.
 - `colab_ultra/telemetry_probe.py` runs on the VM. `colab_ultra/vps_sentinel.py` runs independently on a configured VPS. Workstation configuration lives in `~/.config/colab-ultra/config.json`.

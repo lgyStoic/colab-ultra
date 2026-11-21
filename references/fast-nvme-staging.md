@@ -1,6 +1,8 @@
 # Staging weights on a VM
 
-Import `cu_remote.stage` from the synced Drive scripts directory. A plan resolves one source file, its destination, concurrency and minimum valid size. `run_many` stages files concurrently, propagates worker errors and serializes final copies to Drive. The default floor is 1,000,000 bytes. Use `min_bytes=0` for small, nonempty metadata files.
+Use `cu_remote.models.ensure(model, variant, files, to=nvme_dir)` for weights shared across projects. It checks the Drive manifest before downloading and stages the requested files on local storage. See the [model library guide](model-library.md).
+
+For individual transfers and benchmarks, import `cu_remote.stage` from the synced Drive scripts directory. A plan resolves one source file, its destination, concurrency and minimum valid size. `run_many` stages files concurrently, propagates worker errors and serializes final copies to Drive. The default floor is 1,000,000 bytes. Use `min_bytes=0` for small, nonempty metadata files.
 
 ```python
 import sys
@@ -13,7 +15,7 @@ models = Path("/content/models")
 plans = [
     stage.plan("hf://unsloth/MiniMax-H3-Image-GGUF/minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
                models / "dit.gguf"),
-    stage.plan("drive://ColabUltra/tiles/models/adapter.safetensors", models / "adapter.safetensors"),
+    stage.plan("drive://ColabUltra/models/moss-image-sft/lora-lodestones-8step/lora.safetensors", models / "adapter.safetensors"),
 ]
 stage.run_many(plans)
 ```
