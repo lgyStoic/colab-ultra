@@ -12,7 +12,7 @@ pipelines from live hardware telemetry:
 Usage on Colab:
     import sys
     sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
-    from vram_policy import build_vram_plan, format_vram_plan
+    from cu_remote.vram_policy import build_vram_plan, format_vram_plan
 
     plan = build_vram_plan(
         {"dit": 7.7, "text_encoder": 15.0, "pdd_heads": 0.3, "vae": 0.8},

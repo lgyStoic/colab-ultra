@@ -14,35 +14,27 @@ official KernelsService REST API + Official Kaggle Jupyter Server proxy:
   - Real-time Jupyter WebSocket `exec` streaming + keepalive + graceful `CancelKernelSession`
 """
 
-import base64
 import io
 import json
 import os
 import re
 import tarfile
-import threading
 import time
-import uuid
-from datetime import datetime, timezone
 
 import requests
-import websocket
+
+from colab_ultra.config import save_config
+from colab_ultra.config import DEFAULT_GCLOUD_ADC, DRIVE_ADC_PATH, KAGGLE_SESSIONS_PATH
+
+from .jupyter import (
+    jupyter_ensure_kernel_id,
+    jupyter_exec_ws,
+    jupyter_get_bytes,
+    jupyter_get_kernels,
+    jupyter_put_bytes,
+)
 
 KAGGLE_API_BASE = "https://api.kaggle.com/v1"
-KAGGLE_PROXY_HOST = "jupyter-proxy.kaggle.net"
-
-CONFIG_DIR = os.path.dirname(
-    os.path.expanduser(os.environ.get("COLAB_ULTRA_CONFIG", "~/.config/colab-ultra/config.json"))
-)
-KAGGLE_SESSIONS_PATH = os.path.join(CONFIG_DIR, "kaggle_sessions.json")
-DRIVE_ADC_PATH = os.path.join(CONFIG_DIR, "drive_adc.json")
-DEFAULT_GCLOUD_ADC = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
-
-
-def is_kaggle_proxy(proxy_url: str) -> bool:
-    return bool(proxy_url and KAGGLE_PROXY_HOST in proxy_url)
-
-
 def is_kaggle_gpu_spec(gpu_choice: str, force_kaggle: bool = False) -> bool:
     if force_kaggle:
         return True
@@ -152,15 +144,8 @@ def _load_kaggle_sessions() -> dict:
 
 
 def _save_kaggle_sessions(sessions: dict) -> None:
-    os.makedirs(os.path.dirname(KAGGLE_SESSIONS_PATH), exist_ok=True)
-    tmp = KAGGLE_SESSIONS_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, KAGGLE_SESSIONS_PATH)
-    try:
-        os.chmod(KAGGLE_SESSIONS_PATH, 0o600)
-    except Exception:
-        pass
+    """Publish the private registry atomically."""
+    save_config(sessions, KAGGLE_SESSIONS_PATH)
 
 
 def resolve_carrier_slug(cfg: dict) -> str:
@@ -204,308 +189,6 @@ def resolve_carrier_slug(cfg: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def jupyter_headers(proxy_url: str, proxy_token: str = "") -> tuple[dict, dict]:
-    if is_kaggle_proxy(proxy_url):
-        return {}, {}
-    params = {"authuser": "0", "colab-runtime-proxy-token": proxy_token}
-    headers = {
-        "Authorization": f"Bearer {proxy_token}",
-        "X-Colab-Runtime-Proxy-Token": proxy_token,
-    }
-    return params, headers
-
-
-_PROXY_ROOT_IS_SLASH: dict[str, bool] = {}
-
-
-def _jupyter_root_is_slash(proxy_url: str) -> bool:
-    """Detect once per Kaggle proxy URL whether `/api/contents/` is rooted at `/` or `/kaggle/working`."""
-    base = proxy_url.rstrip("/")
-    if base in _PROXY_ROOT_IS_SLASH:
-        return _PROXY_ROOT_IS_SLASH[base]
-    try:
-        r = requests.get(f"{base}/api/contents/kaggle", params={"content": "0"}, timeout=6.0)
-        is_slash = (r.status_code == 200)
-    except Exception:
-        is_slash = False
-    _PROXY_ROOT_IS_SLASH[base] = is_slash
-    return is_slash
-
-
-def map_contents_path(proxy_url: str, remote_path: str) -> str:
-    """
-    Map a `/content/...` VM path to Jupyter `/api/contents/<rel>` path.
-    - If Jupyter root is `/` (Colab or Kaggle `/`-rooted image) -> `content/...`
-    - If Jupyter root is `/kaggle/working` (symlinked as `/content`) -> strip leading `content/`
-    """
-    clean = remote_path.lstrip("/")
-    if is_kaggle_proxy(proxy_url) and not _jupyter_root_is_slash(proxy_url):
-        if clean == "content":
-            return ""
-        if clean.startswith("content/"):
-            return clean[len("content/"):]
-    return clean
-
-
-def jupyter_get_kernels(proxy_url: str, proxy_token: str = "", timeout: float = 10.0) -> list | None:
-    url = f"{proxy_url.rstrip('/')}/api/kernels"
-    params, headers = jupyter_headers(proxy_url, proxy_token)
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-        if r.status_code in (401, 403, 404, 502, 503, 504):
-            return None
-    except Exception:
-        return None
-    return None
-
-
-def jupyter_ensure_kernel_id(proxy_url: str, proxy_token: str = "") -> str:
-    for _ in range(15):
-        ks = jupyter_get_kernels(proxy_url, proxy_token, timeout=10.0)
-        if ks:
-            return ks[0]["id"]
-        try:
-            params, headers = jupyter_headers(proxy_url, proxy_token)
-            r = requests.post(
-                f"{proxy_url.rstrip('/')}/api/kernels",
-                params=params,
-                headers=headers,
-                json={"name": "python3"},
-                timeout=12,
-            )
-            if r.status_code in (200, 201):
-                return r.json()["id"]
-        except Exception:
-            pass
-        time.sleep(2.0)
-    raise RuntimeError("Kaggle Jupyter 内核未能在预期时间内就绪")
-
-
-def jupyter_put_bytes(proxy_url: str, proxy_token: str, remote_path: str, data: bytes, timeout: float = 60.0):
-    rel = map_contents_path(proxy_url, remote_path)
-    url = f"{proxy_url.rstrip('/')}/api/contents/{rel}"
-    params, headers = jupyter_headers(proxy_url, proxy_token)
-    payload = {
-        "name": os.path.basename(rel),
-        "path": rel,
-        "type": "file",
-        "format": "base64",
-        "content": base64.b64encode(data).decode("ascii"),
-    }
-    resp = requests.put(url, params=params, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
-
-
-def jupyter_get_bytes(proxy_url: str, proxy_token: str, remote_path: str, timeout: float = 60.0) -> bytes | None:
-    rel = map_contents_path(proxy_url, remote_path)
-    url = f"{proxy_url.rstrip('/')}/api/contents/{rel}"
-    params, headers = jupyter_headers(proxy_url, proxy_token)
-    try:
-        r = requests.get(
-            url,
-            params={**params, "content": "1", "type": "file", "format": "base64"},
-            headers=headers,
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            r = requests.get(url, params={**params, "content": "1"}, headers=headers, timeout=timeout)
-        if r.status_code != 200:
-            return None
-        body = r.json()
-        content = body.get("content", "")
-        fmt = body.get("format", "")
-        if fmt == "base64":
-            return base64.b64decode(content)
-        if isinstance(content, (dict, list)):
-            return json.dumps(content).encode("utf-8")
-        return str(content).encode("utf-8")
-    except Exception:
-        return None
-
-
-def jupyter_exec_ws(
-    proxy_url: str,
-    code: str,
-    proxy_token: str = "",
-    kernel_id: str | None = None,
-    timeout: float = 3600.0,
-    stream_stdout: bool = False,
-    stream_to_stderr: bool = False,
-    on_periodic_tick=None,
-    tick_interval_sec: float = 20.0,
-) -> tuple[int, str, str]:
-    """
-    Execute Python code over standard Jupyter WebSocket (`/api/kernels/<id>/channels`),
-    streaming stdout/stderr, maintaining WebSocket ping keepalives, and returning
-    `(exit_code, stdout_str, stderr_str)`.
-    """
-    kid = kernel_id or jupyter_ensure_kernel_id(proxy_url, proxy_token)
-    ws_base = proxy_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
-    sid = uuid.uuid4().hex
-    ws_url = f"{ws_base}/api/kernels/{kid}/channels?session_id={sid}"
-    ws_headers = []
-    if not is_kaggle_proxy(proxy_url) and proxy_token:
-        ws_url += f"&colab-runtime-proxy-token={proxy_token}"
-        ws_headers = [
-            f"Authorization: Bearer {proxy_token}",
-            f"X-Colab-Runtime-Proxy-Token: {proxy_token}",
-            "X-Colab-Client-Agent: colab-cli",
-        ]
-
-    ws = websocket.create_connection(ws_url, header=ws_headers or None, timeout=30)
-    ws.settimeout(5.0)
-    msg_id = uuid.uuid4().hex
-    req = {
-        "header": {
-            "msg_id": msg_id,
-            "username": "colab-ultra",
-            "session": sid,
-            "msg_type": "execute_request",
-            "version": "5.3",
-            "date": datetime.now(timezone.utc).isoformat(),
-        },
-        "parent_header": {},
-        "metadata": {},
-        "content": {
-            "code": code,
-            "silent": False,
-            "store_history": False,
-            "user_expressions": {},
-            "allow_stdin": False,
-            "stop_on_error": True,
-        },
-        "buffers": [],
-        "channel": "shell",
-    }
-
-    out_chunks: list[str] = []
-    err_chunks: list[str] = []
-    exit_code = 0
-    reply_received = False
-    idle_received = False
-
-    t0 = time.time()
-    last_ping = t0
-    last_tick = t0
-
-    try:
-        ws.send(json.dumps(req))
-        while True:
-            now = time.time()
-            if now - t0 > timeout:
-                err_chunks.append(f"\n[colab-ultra] Execution timed out after {timeout}s\n")
-                exit_code = 124
-                break
-
-            if now - last_ping >= 20.0:
-                last_ping = now
-                try:
-                    ws.ping()
-                except Exception:
-                    pass
-
-            if on_periodic_tick and (now - last_tick >= tick_interval_sec):
-                last_tick = now
-                try:
-                    on_periodic_tick()
-                except Exception:
-                    pass
-
-            try:
-                raw = ws.recv()
-            except websocket.WebSocketTimeoutException:
-                continue
-            except Exception as e:
-                # If WebSocket dropped mid-run, fall back to polling kernel busy/idle state
-                err_chunks.append(f"\n[colab-ultra] WebSocket stream interrupted ({e}), polling kernel state...\n")
-                while time.time() - t0 <= timeout:
-                    time.sleep(10.0)
-                    if on_periodic_tick:
-                        try:
-                            on_periodic_tick()
-                        except Exception:
-                            pass
-                    ks = jupyter_get_kernels(proxy_url, proxy_token, timeout=10.0)
-                    if ks is None:
-                        exit_code = 1
-                        break
-                    busy = any(k.get("execution_state") == "busy" for k in ks)
-                    if not busy:
-                        break
-                break
-
-            if not raw:
-                continue
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                continue
-
-            if (msg.get("parent_header") or {}).get("msg_id") != msg_id:
-                continue
-
-            mtype = msg.get("msg_type") or (msg.get("header") or {}).get("msg_type") or ""
-            content = msg.get("content") or {}
-
-            if mtype == "stream":
-                sname = content.get("name", "stdout")
-                txt = content.get("text", "")
-                if sname == "stderr":
-                    err_chunks.append(txt)
-                    if stream_stdout or stream_to_stderr:
-                        import sys
-                        sys.stderr.write(txt)
-                        sys.stderr.flush()
-                else:
-                    out_chunks.append(txt)
-                    if stream_stdout:
-                        import sys
-                        sys.stdout.write(txt)
-                        sys.stdout.flush()
-                    elif stream_to_stderr:
-                        import sys
-                        sys.stderr.write(txt)
-                        sys.stderr.flush()
-            elif mtype in ("execute_result", "display_data"):
-                txt = (content.get("data") or {}).get("text/plain", "")
-                if txt:
-                    out_chunks.append(txt + "\n")
-                    if stream_stdout:
-                        print(txt, flush=True)
-            elif mtype == "error":
-                exit_code = 1
-                tb = "\n".join(content.get("traceback") or [])
-                if not tb:
-                    tb = f"{content.get('ename', 'Error')}: {content.get('evalue', '')}"
-                # Strip ANSI escape sequences only for clean JSON logs if needed, keep readable stderr
-                err_chunks.append(tb + "\n")
-                if stream_stdout:
-                    import sys
-                    sys.stderr.write(tb + "\n")
-                    sys.stderr.flush()
-            elif mtype == "execute_reply":
-                reply_received = True
-                if content.get("status") == "error":
-                    exit_code = 1
-                if idle_received:
-                    break
-            elif mtype == "status":
-                if content.get("execution_state") == "idle":
-                    idle_received = True
-                    if reply_received:
-                        break
-    finally:
-        try:
-            ws.close()
-        except Exception:
-            pass
-
-    return exit_code, "".join(out_chunks), "".join(err_chunks)
-
-
-# ---------------------------------------------------------------------------
 # Google Drive Cloud-to-Cloud Short-Lived Token Helper (Zero Long-Lived Secrets on VM)
 # ---------------------------------------------------------------------------
 
@@ -818,8 +501,7 @@ def flush_kaggle_outputs_before_stop(proxy_url: str, local_hub: str | None):
     """Best-effort sync of any modified `runs/` files across all projects on `/content/drive/MyDrive/ColabUltra` before stopping."""
     if not local_hub:
         return
-    drive_tok = get_short_lived_drive_token()
-    code = f"""
+    code = """
 import os, tarfile
 base = '/content/drive/MyDrive/ColabUltra'
 out_tar = '/content/_cu_shutdown_flush.tar.gz'
@@ -1065,22 +747,15 @@ def list_active_kaggle_vms(probe_local_path: str = "", auto_deploy: bool = True)
     if not sessions:
         return []
 
-    dirty = False
     vms = []
     for s_name, info in list(sessions.items()):
         p_url = info.get("proxy_url") or ""
         if not p_url:
-            # Stale half-created entry > 5 min old
-            if time.time() - info.get("created_at", 0) > 300:
-                sessions.pop(s_name, None)
-                dirty = True
             continue
 
         kernels = jupyter_get_kernels(p_url, "", timeout=8.0)
         if kernels is None:
-            # Session stopped or expired on Kaggle
-            sessions.pop(s_name, None)
-            dirty = True
+            # A failed proxy check does not establish that billing stopped.
             continue
 
         kernel_state = "idle"
@@ -1105,8 +780,6 @@ def list_active_kaggle_vms(probe_local_path: str = "", auto_deploy: bool = True)
             "telemetry": telemetry,
         })
 
-    if dirty:
-        _save_kaggle_sessions(sessions)
     return vms
 
 
@@ -1122,40 +795,37 @@ def shut_down_kaggle_session(vm: dict, local_hub: str | None = None, flush_outpu
     if flush_outputs and p_url:
         flush_kaggle_outputs_before_stop(p_url, local_hub)
 
-    ok = False
-    if sid:
-        try:
-            r = requests.post(
-                f"{KAGGLE_API_BASE}/kernels.KernelsApiService/CancelKernelSession",
-                headers=_kaggle_headers(),
-                json={"kernelSessionId": int(sid)},
-                timeout=15,
-            )
-            ok = r.status_code == 200
-        except Exception:
-            pass
+    if not sid:
+        raise ValueError(f"Missing Kaggle session ID for {vm['name']}")
+    response = requests.post(f"{KAGGLE_API_BASE}/kernels.KernelsApiService/CancelKernelSession",
+                             headers=_kaggle_headers(), json={"kernelSessionId": int(sid)}, timeout=15)
+    if response.status_code != 404:
+        response.raise_for_status()
+    return True
 
+
+def kaggle_active(vm):
+    """Check the specific Jupyter endpoint. Treat ambiguous transport failures as unknown."""
+    if vm.get("proxy_url"):
+        response = requests.get(f"{vm['proxy_url'].rstrip('/')}/api/kernels", timeout=8)
+        if response.status_code in (404, 410):
+            return False
+        response.raise_for_status()
+        if not isinstance(response.json(), list):
+            raise ValueError(f"Unexpected Kaggle kernel status for {vm['name']}")
+        return True
+    # Interrupted creations have a carrier slug but may lack a proxy.
+    owner, slug = vm["slug"].split("/", 1)
+    response = requests.post(f"{KAGGLE_API_BASE}/kernels.KernelsApiService/GetKernelSessionStatus",
+                             headers=_kaggle_headers(), json={"userName": owner, "kernelSlug": slug}, timeout=10)
+    response.raise_for_status()
+    status = response.json().get("status", "QUEUED")
+    return str(status).upper() not in {"2", "3", "5", "COMPLETE", "ERROR", "CANCEL_ACKNOWLEDGED"}
+
+
+def forget_kaggle_session(vm):
+    """Drop a verified stopped session only if the local name still matches its ID."""
     sessions = _load_kaggle_sessions()
-    if vm.get("name") in sessions:
+    if sessions.get(vm["name"], {}).get("session_id") == vm["session_id"]:
         sessions.pop(vm["name"], None)
         _save_kaggle_sessions(sessions)
-    return ok
-
-
-def cancel_all_orphan_kaggle_sessions(carrier_slug: str | None = None):
-    """Ensure local registry is cleared if user requests `--all` down."""
-    sessions = _load_kaggle_sessions()
-    for s_name, info in list(sessions.items()):
-        sid = info.get("session_id")
-        if sid:
-            try:
-                requests.post(
-                    f"{KAGGLE_API_BASE}/kernels.KernelsApiService/CancelKernelSession",
-                    headers=_kaggle_headers(),
-                    json={"kernelSessionId": int(sid)},
-                    timeout=12,
-                )
-            except Exception:
-                pass
-    if sessions:
-        _save_kaggle_sessions({})

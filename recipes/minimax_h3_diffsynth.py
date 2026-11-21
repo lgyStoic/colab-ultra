@@ -2,7 +2,7 @@
 """Colab Ultra — Reusable High-Throughput MiniMax-H3-Image Batch Runner (L4 / G4 / A100).
 
 Drop a `prompts.json` into your project's `code/` directory and run directly without writing new code:
-    colab-ultra exec -s l4 -p <project> -f ~/.gemini/config/skills/colab-ultra/workflows/minimax_h3_batch.py && colab-ultra down -s l4 --json
+    colab-ultra exec -s l4 -p <project> -f ~/.gemini/config/skills/colab-ultra/recipes/minimax_h3_diffsynth.py
 
 Minimal `prompts.json` schema:
 {
@@ -42,6 +42,15 @@ import threading
 import time
 from pathlib import Path
 
+sys.path.insert(0, "/content/drive/MyDrive/ColabUltra/scripts")
+try:
+    from cu_remote import recipe, stage, vram_policy
+except ModuleNotFoundError as exc:
+    if exc.name != "cu_remote":
+        raise
+    # Source checkout for offline dry runs.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from colab_ultra.remote import recipe, stage, vram_policy
 
 PROCESSOR_FILES = (
     "chat_template.json",
@@ -74,17 +83,7 @@ def move_tensors(obj, device: str):
 
 
 def main() -> None:
-    cwd = Path.cwd()
-    # When launched via `colab-ultra exec -p <project>`, cwd is `/content/drive/MyDrive/ColabUltra/<project>/code`
-    project_root = cwd.parent if cwd.name == "code" else Path("/content/drive/MyDrive/ColabUltra/outputs")
-    cfg_path = Path(os.environ.get("H3_PROMPTS_JSON", str(cwd / "prompts.json")))
-    if not cfg_path.exists():
-        raise FileNotFoundError(
-            f"prompts.json not found at {cfg_path}. Create `~/ColabUltra/<project>/code/prompts.json` "
-            "or set H3_PROMPTS_JSON=/path/to/prompts.json."
-        )
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-
+    cfg, cwd, project_root = recipe.load_project()
     run_name = cfg.get("run_name", time.strftime("h3_%Y%m%d_%H%M%S"))
     width = int(cfg.get("width", 2048))
     height = int(cfg.get("height", 2048))
@@ -101,45 +100,18 @@ def main() -> None:
     }
 
     out_dir = project_root / "runs" / run_name
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    t0 = time.time()
-    import torch
-
-    gpu_major, gpu_minor = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    is_pre_ampere = torch.cuda.is_available() and gpu_major < 8
-    run_dtype = torch.bfloat16
     vae_fp32 = bool(cfg.get("vae_fp32", False))  # full-precision original VAE (reduces 16px lattice artifacts)
     use_vae_int8 = not vae_fp32
     dit_nf4 = bool(cfg.get("dit_nf4", False))  # bf16 DiT + bitsandbytes NF4 (4-bit weight-only, bf16 activations); no EntroPack for the DiT
-    if is_pre_ampere:
-        # lgyStoic/DiffSynth-Studio@t4-sm75-int8-support natively enables cuBLAS INT8 Tensor Core
-        # & MemEfficient FP16 SDPA on Turing (sm_75 / Tesla T4) while keeping bfloat16 outer activations.
-        compile_dit = False
-
     diffsynth_repo = str(cfg.get("diffsynth_repo", "https://github.com/lgyStoic/DiffSynth-Studio.git"))
     diffsynth_branch = str(cfg.get("diffsynth_branch", "t4-sm75-int8-support"))
-
-    print(
-        f"[Start] {time.strftime('%Y-%m-%d %H:%M:%S')} | project={project_root.name} | run={run_name} | "
-        f"gpu={gpu_name} (sm_{gpu_major}{gpu_minor}, dtype={run_dtype}) | count={len(items)} | "
-        f"res={width}x{height} | dit={dit_variant} | vae_int8={use_vae_int8} | compile={compile_dit} | vae_bs={vae_batch_size}",
-        flush=True,
-    )
 
     # Pick largest ephemeral local disk (/content on Colab, /tmp on Kaggle where /kaggle/working is ~19 GB)
     content_free_gb = shutil.disk_usage("/content").free / (1024 ** 3) if os.path.exists("/content") else 0.0
     tmp_free_gb = shutil.disk_usage("/tmp").free / (1024 ** 3) if os.path.exists("/tmp") else 0.0
     nvme_root = Path("/content/models") if content_free_gb >= 35.0 or content_free_gb >= tmp_free_gb else Path("/tmp/models")
     print(f"[Disk] staging root={nvme_root} (/content free={content_free_gb:.1f} GiB, /tmp free={tmp_free_gb:.1f} GiB)", flush=True)
-
-    scripts_dir = Path("/content/drive/MyDrive/ColabUltra/scripts")
-    has_drive_scripts = (scripts_dir / "fast_stage_nvme.py").exists() and (scripts_dir / "vram_policy.py").exists()
-    if has_drive_scripts:
-        sys.path.insert(0, str(scripts_dir))
-        import fast_stage_nvme
-        importlib.reload(fast_stage_nvme)
 
     staging_err: list[Exception] = []
     stage_elapsed = [0.0]
@@ -199,48 +171,40 @@ def main() -> None:
     if dit_nf4:
         hf_urls = [u for u in hf_urls if u[1] != f"{dit_file}.json"]  # bf16 DiT has no EntroPack sidecar
 
-    def _fallback_aria2_stage(dest_root: Path, urls: list[tuple[str, str, str]]) -> None:
-        if not shutil.which("aria2c"):
-            subprocess.run(
-                ["apt-get", "-qq", "-o", "Dir::Etc::sourcelist=sources.list", "-o", "Dir::Etc::sourceparts=-", "-o", "APT::Get::List-Cleanup=0", "update"],
-                check=False,
-            )
-            subprocess.run(["apt-get", "-qq", "install", "-y", "--no-install-recommends", "aria2"], check=False)
-        lines = []
-        for subdir, fname, url in urls:
-            ddir = dest_root / subdir
-            ddir.mkdir(parents=True, exist_ok=True)
-            dest = ddir / fname
-            if dest.exists() and dest.stat().st_size > 0 and not Path(f"{dest}.aria2").exists():
-                continue
-            lines.append(f"{url}\n  dir={ddir}\n  out={fname}\n")
-        if not lines:
-            return
-        if shutil.which("aria2c"):
-            lst = Path("/tmp/aria2_fallback_hf.txt")
-            lst.write_text("".join(lines), encoding="utf-8")
-            subprocess.check_call(
-                ["aria2c", "-i", str(lst), "-j6", "-x16", "-s16", "-k16M", "--file-allocation=none", "--continue=true", "--console-log-level=warn", "--summary-interval=10"]
-            )
-        else:
-            for subdir, fname, url in urls:
-                dest = dest_root / subdir / fname
-                if not dest.exists() or dest.stat().st_size == 0:
-                    subprocess.check_call(["curl", "-fsSL", "-C", "-", "-o", str(dest), url])
+    plans = [stage.plan(url, nvme_root / folder / name,
+                        min_bytes=stage.MIN_BYTES if name.endswith(".safetensors") else 0)
+             for folder, name, url in hf_urls]
+    if recipe.dry_run():
+        recipe.describe(cfg, run_name)
+        print("git clone -b", diffsynth_branch, diffsynth_repo)
+        for item in plans:
+            print(item.backend, item.source, "->", item.dest)
+        print(f"MiniMaxH3ImagePipeline: vae_fp32={vae_fp32} dit_nf4={dit_nf4} -> {out_dir}")
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    import torch
+
+    gpu_major, gpu_minor = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    is_pre_ampere = torch.cuda.is_available() and gpu_major < 8
+    run_dtype = torch.bfloat16
+    if is_pre_ampere:
+        # lgyStoic/DiffSynth-Studio@t4-sm75-int8-support natively enables cuBLAS INT8 Tensor Core
+        # & MemEfficient FP16 SDPA on Turing (sm_75 / Tesla T4) while keeping bfloat16 outer activations.
+        compile_dit = False
+
+    print(
+        f"[Start] {time.strftime('%Y-%m-%d %H:%M:%S')} | project={project_root.name} | run={run_name} | "
+        f"gpu={gpu_name} (sm_{gpu_major}{gpu_minor}, dtype={run_dtype}) | count={len(items)} | "
+        f"res={width}x{height} | dit={dit_variant} | vae_int8={use_vae_int8} | compile={compile_dit} | vae_bs={vae_batch_size}",
+        flush=True,
+    )
 
     def _bg_stage() -> None:
         try:
             t_s = time.time()
-            if has_drive_scripts:
-                fast_stage_nvme.stage_dual_channel(
-                    dest_root=nvme_root,
-                    drive_files=[],
-                    hf_urls=hf_urls,
-                    concurrency=6,
-                    splits=16,
-                )
-            else:
-                _fallback_aria2_stage(nvme_root, hf_urls)
+            stage.run_many(plans)
             stage_elapsed[0] = time.time() - t_s
         except Exception as exc:
             staging_err.append(exc)
@@ -306,8 +270,6 @@ def main() -> None:
     print(f"[Timer] nvme_stage (background): {stage_elapsed[0]:.2f}s | wall_prep_total: {t_prep_wall:.2f}s", flush=True)
 
     import torch
-    from PIL import Image
-    from tqdm import tqdm
     from diffsynth.configs import MODEL_CONFIGS
     from diffsynth.pipelines.minimax_h3_image import (
         MINIMAX_H3_IMAGE_PIXEL_MEAN,
@@ -317,6 +279,8 @@ def main() -> None:
         MiniMaxH3ImageUnit_PromptEmbedder,
         ModelConfig,
     )
+    from PIL import Image
+    from tqdm import tqdm
     dit_path = nvme_root / f"DiffSynth-Studio/MiniMax-H3-Image-EntroPack/models/{dit_file}.safetensors"
     te_path = nvme_root / "DiffSynth-Studio/EntroPackPreQuants/models/MiniMax-H3/text_encoder_4bpp.safetensors"
     pdd_path = nvme_root / "MiniMax/MiniMax-H3-Image/pdd_fused_heads.safetensors"
@@ -333,23 +297,8 @@ def main() -> None:
         "pdd_heads": pdd_path.stat().st_size / (1024 ** 3),
         "vae": vae_path.stat().st_size / (1024 ** 3),
     }
-    if has_drive_scripts:
-        import vram_policy
-        importlib.reload(vram_policy)
-        plan = vram_policy.build_vram_plan(comp_sizes_gb, resolution=(width, height), dtype=run_dtype)
-        print(vram_policy.format_vram_plan(plan), flush=True)
-    else:
-        total_vram = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
-        def _mk(off, on):
-            return {
-                "offload_dtype": run_dtype, "offload_device": off,
-                "onload_dtype": run_dtype, "onload_device": on,
-                "preparing_dtype": run_dtype, "preparing_device": "cuda",
-                "computation_dtype": run_dtype, "computation_device": "cuda",
-            }
-        cfgs = {k: _mk("cpu", "cuda" if total_vram >= sz + 3.5 else "cpu") for k, sz in comp_sizes_gb.items()}
-        plan = {"mode": "tight_offload" if total_vram < 18.0 else "selective_offload", "configs": cfgs, "vram_limit": round(max(1.0, total_vram - 1.5), 2), "vae_tiling": False}
-        print(f"[VRAM Policy Fallback] total_vram={total_vram:.2f} GiB | mode={plan['mode']} | vae_tiling={plan['vae_tiling']}", flush=True)
+    plan = vram_policy.build_vram_plan(comp_sizes_gb, resolution=(width, height), dtype=run_dtype)
+    print(vram_policy.format_vram_plan(plan), flush=True)
     vae_tiling = bool(cfg.get("vae_tiling", plan["vae_tiling"]))
 
     def register_local_prequantized(safetensors_path: Path, vram_cfg: dict) -> ModelConfig:
@@ -388,16 +337,9 @@ def main() -> None:
     torch.cuda.reset_peak_memory_stats()
     prepared = []
 
-    def _resolve_img(spec) -> Path:
-        pp = Path(str(spec)).expanduser()
-        for cand in (pp, cwd / pp, project_root / pp, project_root / "data" / pp, project_root / "runs" / pp):
-            if cand.is_file():
-                return cand
-        raise FileNotFoundError(f"edit_image not found: {spec} (searched cwd, project root, data/, runs/)")
-
     def _load_edit_images(spec):
         specs = spec if isinstance(spec, (list, tuple)) else [spec]
-        return [Image.open(_resolve_img(x)).convert("RGB") for x in specs]
+        return [Image.open(recipe.resolve_image(x, cwd, project_root)).convert("RGB") for x in specs]
 
     with torch.no_grad():
         pipe.load_models_to_device(["text_encoder"])

@@ -11,8 +11,10 @@ Zero dependency on local laptop/desktop! Even if the local machine is powered of
      20TB Google Drive and trips the breaker (unassigns the VM) after the configured timeout.
 """
 
+import base64
 import json
 import os
+import subprocess
 import time
 import urllib.parse
 import urllib.request
