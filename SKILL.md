@@ -32,12 +32,13 @@ Run each command separately so the task log shows live progress.
 ## Hard Rules
 
 - Run `up`, `exec` and `down` with live terminal output. Omit `--json`, pipes such as `| grep`, and shell chains. Use `--json` only on `status` when parsing its output.
-- Land multi-connection aria2c downloads on local NVMe under `/content/` first. Then copy sequentially to `/content/drive/MyDrive/` with `cp` or `shutil.copy2`. Reject incomplete transfers and files with an `.aria2` sidecar.
+- Land multi-connection downloads (default `hf_transfer` c=64, or `aria2c` c=16) on local NVMe under `/content/` first. Then copy sequentially to `/content/drive/MyDrive/` with `cp` or `shutil.copy2`. Reject incomplete transfers and `.aria2` sidecars.
 - Copy Drive-cached binaries into `/tmp` and run `chmod +x` there. Drive FUSE does not preserve the execute bit.
 - Confirm outputs have reached Drive before releasing the session. Use `down -s NAME` for one session. Check all active tasks before using `down --all`.
 
 ## Pitfalls Learned
 
 - A prior 34.16 GB download wrote directly to Drive FUSE at about **32.6 MB/s** and took **1048.7s**. Sequential writes from local storage measured about **440–495 MB/s**. Include the final Drive copy when comparing backends.
+- On Colab High-RAM CPU (`smoke`), staging the 3 MiniMax-H3 HF files (`34,162,458,528` bytes, `workers=3`) to NVMe took **99.46s** (**343.47 MB/s**) with `hf_transfer` (`c=64`, now HF/HTTP default) vs **119.45s** (**285.99 MB/s**) with `aria2` (`c=16`), a **20.1%** speedup.
 - On L4, an Nsight Systems (`nsys`) profile measured **~89.1% active SM utilization**. The workload was compute-bound: `mul_mat_q` accounted for **53.8%**, SageAttention for **~17.8%**, and PCIe memcpy for **~1.3%**.
 - A closed WebSocket can leave a remote task running. After a lost acknowledgement, check `colab-ultra status` and the project's outputs before submitting again. For a missing assignment, recreate the named session with its original hardware flags.

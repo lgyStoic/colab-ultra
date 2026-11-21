@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -39,7 +40,7 @@ def hf_url(repo, filename, revision="main"):
     return f"https://huggingface.co/{repo}/resolve/{quote(revision, safe='')}/{quote(filename)}"
 
 
-def plan(source, dest, *, backend="aria2", concurrency=None, min_bytes=MIN_BYTES):
+def plan(source, dest, *, backend="hf_transfer", concurrency=None, min_bytes=MIN_BYTES):
     """Resolve a file source and choose the local download and publication paths."""
     dest = Path(dest).resolve()
     source = str(source)
@@ -124,12 +125,26 @@ def _download(item, temp):
         count = str(item.concurrency)
         cmd = ["aria2c", "-x", count, "-s", count, "-k", "4M", "--file-allocation=none",
                "--auto-file-renaming=false", "-d", str(temp.parent), "-o", temp.name]
-        # Pass authorization through stdin, never in process arguments or logs.
-        config = "".join(f"header={k}: {v}\n" for k, v in headers.items())
-        subprocess.run([*cmd, "--conf-path=/dev/stdin", url], input=config, text=True, check=True)
+        conf_path = temp.with_name(f"{temp.name}.aria2.conf") if headers else None
+        try:
+            if conf_path is not None:
+                # Pass authorization through a restricted config file, never in argv or logs.
+                conf_path.write_text("".join(f"header={k}: {v}\n" for k, v in headers.items()), encoding="utf-8")
+                conf_path.chmod(0o600)
+                subprocess.run([*cmd, f"--conf-path={conf_path}", url], check=True)
+            else:
+                subprocess.run([*cmd, url], check=True)
+        finally:
+            if conf_path is not None:
+                conf_path.unlink(missing_ok=True)
     else:
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-        import hf_transfer
+        with _install_lock:
+            try:
+                import hf_transfer
+            except ImportError:
+                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "hf_transfer"], check=True)
+                import hf_transfer
 
         hf_transfer.download(url=url, filename=str(temp), max_files=item.concurrency, headers=headers,
                              chunk_size=10 * 1024 * 1024, parallel_failures=min(3, item.concurrency - 1), max_retries=5)

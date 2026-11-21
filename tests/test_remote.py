@@ -30,9 +30,10 @@ def test_plans(stage, tmp_path, monkeypatch):
     dest = stage.DRIVE / "MyDrive" / "tile"
     hf = stage.plan("hf://org/model/sub/file", dest, concurrency=64)
     assert hf.source == "https://huggingface.co/org/model/resolve/main/sub/file"
-    assert hf.copy_to_drive and hf.work_dir == stage.NVME and hf.concurrency == 16
+    assert hf.copy_to_drive and hf.work_dir == stage.NVME and hf.backend == "hf_transfer" and hf.concurrency == 64
     assert stage.plan(hf.source, dest).source == hf.source
-    assert stage.plan("https://example.test/w", tmp_path / "w", backend="hf_transfer").concurrency == 64
+    assert stage.plan("https://example.test/w", tmp_path / "w").concurrency == 64
+    assert stage.plan("https://example.test/w", tmp_path / "w", backend="aria2", concurrency=64).concurrency == 16
     drive = stage.plan("drive://models/w", tmp_path / "w")
     assert drive.source == str(stage.DRIVE / "MyDrive/models/w") and drive.backend == "copy"
     assert stage.plan(drive.source, tmp_path / "v").backend == "copy"
@@ -88,6 +89,50 @@ def test_hf_transfer_benchmark(stage, tmp_path, monkeypatch):
     assert result["bytes"] == 5 and result["MB_per_second"] > 0
     with pytest.raises(ValueError, match="fresh"):
         stage.benchmark([plan])
+
+
+def test_aria2_without_headers_omits_conf_path(stage, tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(stage, "ensure_aria2", lambda: None)
+    seen = []
+    temp = tmp_path / "weights.bin.part"
+
+    def fake_run(cmd, **kwargs):
+        seen.append((list(cmd), kwargs))
+        temp.write_bytes(b"weights")
+
+    monkeypatch.setattr(stage.subprocess, "run", fake_run)
+    item = stage.plan("https://example.test/weights.bin", tmp_path / "weights.bin", backend="aria2", min_bytes=0)
+    stage._download(item, temp)
+    assert len(seen) == 1
+    cmd, kwargs = seen[0]
+    assert cmd[0] == "aria2c"
+    assert not any(arg.startswith("--conf-path") for arg in cmd)
+    assert "input" not in kwargs
+
+
+def test_aria2_with_hf_token_uses_temp_conf_file(stage, tmp_path, monkeypatch):
+    token = "hf_secret_test_token"
+    monkeypatch.setenv("HF_TOKEN", token)
+    monkeypatch.setattr(stage, "ensure_aria2", lambda: None)
+    seen = []
+    temp = tmp_path / "model.gguf.part"
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        conf_flags = [arg for arg in cmd if arg.startswith("--conf-path=")]
+        assert len(conf_flags) == 1
+        conf_path = Path(conf_flags[0].split("=", 1)[1])
+        assert conf_path.parent == temp.parent and conf_path.exists()
+        assert f"header=Authorization: Bearer {token}" in conf_path.read_text(encoding="utf-8")
+        temp.write_bytes(b"gguf")
+
+    monkeypatch.setattr(stage.subprocess, "run", fake_run)
+    item = stage.plan("hf://org/repo/model.gguf", tmp_path / "model.gguf", backend="aria2", min_bytes=0)
+    stage._download(item, temp)
+    assert len(seen) == 1
+    assert all(token not in arg for arg in seen[0])
+    assert not list(tmp_path.glob("*.aria2.conf"))
 
 
 def test_sync_verifies_before_removing_legacy(tmp_path, monkeypatch):
@@ -154,7 +199,7 @@ def test_recipe_dry_run(tmp_path, name, feature, env_flag):
         cmd.append("--dry-run")
     output = subprocess.check_output(cmd, cwd=tmp_path, env=env, text=True)
     assert "a red kite" in output and "input.png" in output and feature in output
-    assert "aria2" in output and not (tmp_path / "runs").exists()
+    assert "hf_transfer" in output and not (tmp_path / "runs").exists()
     (code / "prompts.json").write_text('{"prompts": [{}]}')
     bad = subprocess.run(cmd, cwd=tmp_path, env=env, capture_output=True, text=True)
     assert bad.returncode and "expected a prompt" in bad.stderr

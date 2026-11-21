@@ -109,26 +109,42 @@ def mount_drive(name, path="/content/drive"):
 
 
 def initialize_drive(colab_bin, name, quiet=False):
-    """Initialize the hub and disambiguate a hung CLI close from a failed mount."""
-    import subprocess
+    """Initialize the hub and disambiguate a hung execution channel from a failed mount."""
+    from pathlib import Path
 
     import requests
 
     from colab_ultra.backends.colab import resolve_proxy
     from colab_ultra.backends.jupyter import jupyter_headers
     from colab_ultra.config import BASE_DIR
+    from colab_ultra.retry import transient
 
     mount_drive(name)
     script = os.path.join(BASE_DIR, "workflows", "init_20tb_drive.py")
+    code = Path(script).read_text(encoding="utf-8")
+    url, token = resolve_proxy(name)
+    caught = None
+    rc = 0
+    err = ""
     try:
-        subprocess.run([colab_bin, "--auth", "adc", "exec", "-s", name, "--timeout", "45", "-f", script],
-                       stdout=subprocess.DEVNULL if quiet else None, check=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        url, token = resolve_proxy(name)
+        rc, _, err = jupyter_exec_ws(url, code, proxy_token=token, timeout=60, stream_stdout=not quiet)
+    except Exception as exc:
+        caught = exc
+        if not (isinstance(exc, TimeoutError) or transient(exc)
+                or (exc.__cause__ is not None and transient(exc.__cause__))
+                or "after submission" in str(exc)):
+            raise
+    if caught is None and rc == 0:
+        return
+    try:
         params, headers = jupyter_headers(url, token)
         result = requests.get(f"{url.rstrip('/')}/api/contents/content/drive/MyDrive",
                               params={**params, "content": "1"}, headers=headers, timeout=10)
         result.raise_for_status()
         listing = result.json()
-        if listing.get("type") != "directory" or not isinstance(listing.get("content"), list):
-            raise
+    except Exception as verify_exc:
+        detail = caught if caught is not None else f"exit code {rc}: {err}".strip()
+        raise RuntimeError(f"Drive initialization failed for '{name}' ({detail})") from verify_exc
+    if listing.get("type") == "directory" and isinstance(listing.get("content"), list):
+        return
+    raise RuntimeError(f"Drive initialization failed for '{name}': MyDrive is not listable")

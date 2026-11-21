@@ -1,5 +1,4 @@
 import signal
-import subprocess
 from http.client import RemoteDisconnected
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
@@ -113,11 +112,13 @@ def test_down_deadline_includes_discovery(monkeypatch):
     assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
 
 
+@pytest.mark.parametrize("outcome", [TimeoutError("ws timeout"), ConnectionError("ws reset"), (1, "", "mount err")])
 @pytest.mark.parametrize("listing, success", [({"type": "directory", "content": []}, True), ({"type": "file"}, False)])
-def test_mount_timeout_checks_remote_listing(monkeypatch, listing, success):
+def test_mount_timeout_checks_remote_listing(monkeypatch, outcome, listing, success):
     monkeypatch.setattr(drive, "mount_drive", Mock())
-    monkeypatch.setattr(subprocess, "run", Mock(side_effect=subprocess.TimeoutExpired("colab", 60)))
     monkeypatch.setattr(colab, "resolve_proxy", lambda _: ("https://vm.invalid", "test"))
+    ws = Mock(side_effect=outcome) if isinstance(outcome, BaseException) else Mock(return_value=outcome)
+    monkeypatch.setattr(drive, "jupyter_exec_ws", ws)
     response = Mock()
     response.json.return_value = listing
     get = Mock(return_value=response)
@@ -125,8 +126,9 @@ def test_mount_timeout_checks_remote_listing(monkeypatch, listing, success):
     if success:
         drive.initialize_drive("colab", "a")
     else:
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(RuntimeError):
             drive.initialize_drive("colab", "a")
+    assert ws.call_args.kwargs["proxy_token"] == "test"
     assert get.call_args.args[0].endswith("/api/contents/content/drive/MyDrive")
 
 
