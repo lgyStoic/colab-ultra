@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
 
 
 CONFIG_DIR = os.path.dirname(CONFIG_PATH) or "."
+KAGGLE_QUOTA_CACHE_PATH = os.path.join(CONFIG_DIR, "kaggle_quota_cache.json")
 KAGGLE_SESSIONS_PATH = os.path.join(CONFIG_DIR, "kaggle_sessions.json")
 DRIVE_ADC_PATH = os.path.join(CONFIG_DIR, "drive_adc.json")
 DEFAULT_GCLOUD_ADC = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")

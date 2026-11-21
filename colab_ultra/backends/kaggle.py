@@ -20,11 +20,17 @@ import os
 import re
 import tarfile
 import time
+from datetime import datetime, timezone
 
 import requests
 
-from colab_ultra.config import save_config
-from colab_ultra.config import DEFAULT_GCLOUD_ADC, DRIVE_ADC_PATH, KAGGLE_SESSIONS_PATH
+from colab_ultra.config import (
+    DEFAULT_GCLOUD_ADC,
+    DRIVE_ADC_PATH,
+    KAGGLE_QUOTA_CACHE_PATH,
+    KAGGLE_SESSIONS_PATH,
+    save_config,
+)
 
 from .jupyter import (
     jupyter_ensure_kernel_id,
@@ -95,8 +101,9 @@ def _parse_proto_seconds(val) -> float:
         return float(m.group(1)) if m else 0.0
 
 
-def get_kaggle_quota(timeout: float = 8.0) -> dict:
-    """Query Kaggle weekly free GPU (T4 x2) and TPU quota in hours."""
+def get_kaggle_quota(timeout: float = 8.0, cache_path: str | os.PathLike | None = None) -> dict:
+    """Query Kaggle's weekly GPU and TPU quota, with a local cache on API failure."""
+    target = cache_path or KAGGLE_QUOTA_CACHE_PATH
     tok = load_kaggle_token()
     if not tok:
         return {"configured": False}
@@ -118,7 +125,7 @@ def get_kaggle_quota(timeout: float = 8.0) -> dict:
         t_tot = _parse_proto_seconds(tq.get("totalTimeAllowed"))
         t_used = _parse_proto_seconds(tq.get("timeUsed"))
 
-        return {
+        quota = {
             "configured": True,
             "gpu_total_hours": round(g_tot / 3600.0, 2),
             "gpu_used_hours": round(g_used / 3600.0, 2),
@@ -129,7 +136,21 @@ def get_kaggle_quota(timeout: float = 8.0) -> dict:
             "refresh_time": data.get("quotaRefreshTime", ""),
         }
     except Exception as e:
-        return {"configured": True, "error": str(e)}
+        cache = None
+        try:
+            with open(target, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                cache = data
+        except Exception:
+            pass
+        return {"configured": True, "error": str(e), "cache": cache}
+
+    try:
+        save_config({**quota, "fetched_at": datetime.now(timezone.utc).isoformat()}, target)
+    except Exception:
+        pass
+    return quota
 
 
 def _load_kaggle_sessions() -> dict:
