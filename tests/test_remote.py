@@ -182,8 +182,7 @@ def test_binary_cache_and_encoding(tmp_path, monkeypatch):
     assert dest.read_bytes() == b"encoded" and not src.exists()
 
 
-@pytest.mark.parametrize("name, feature", [("minimax_h3_diffsynth", "dit_nf4=True"),
-                                          ("minimax_h3_sdcpp_server", "--max-vram 17")])
+@pytest.mark.parametrize("name, feature", [("minimax_h3_diffsynth", "dit_nf4=True")])
 @pytest.mark.parametrize("env_flag", [True, False])
 def test_recipe_dry_run(tmp_path, name, feature, env_flag):
     code = tmp_path / "code"

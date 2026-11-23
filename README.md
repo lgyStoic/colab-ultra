@@ -112,7 +112,7 @@ colab-ultra exec -s demo -p tiles -f recipes/my_infer.py --timeout 7200
 | 路径 / 文档 | 说明 |
 | --- | --- |
 | `colab_ultra/` | 本机 CLI（`cli.py`、`breaker.py`、`models_cli.py`）、传输与生命周期（`session.py`、`backends/`）、配置与挂载（`config.py`、`drive.py`、`staging.py`、`telemetry.py`）与 VM 共享库源码（`remote/`） |
-| `recipes/` | 开箱即用的 MiniMax-H3（DiffSynth / `sd-server` GGUF）配方与自定义模板，详见 [recipes 使用说明](recipes/README.md) |
+| `recipes/` | 开箱即用的 MiniMax-H3（DiffSynth）配方与自定义模板，详见 [recipes 使用说明](recipes/README.md) |
 | `tools/migrate_models.py` | 将旧版分散在项目或分类目录下的模型迁移、去重至全局共享模型库 |
 | `workflows/` | 环境自检、20TB Drive 初始化等辅助脚本 |
 | [SKILL.md](SKILL.md) | 完整命令约定、T4 默认路由规则、Agent 零轮询协作规范与实机踩坑记录 |
