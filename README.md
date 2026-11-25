@@ -51,6 +51,7 @@ colab-ultra down -s demo
 | 命令 | 用途 |
 | --- | --- |
 | `colab-ultra status` | 查看活跃实例、GPU/CPU 负载、心跳与 CU/Kaggle 余额，加 `--json` 输出结构化数据。 |
+| `colab-ultra specs` | 查询硬件规格、精度支持和单位 CU 的峰值算力，可按显存和硬件类型筛选。 |
 | `colab-ultra up -s demo` | 启动会话。默认 T4 优先 Kaggle 双卡；可用 `--gpu L4` / `--cpu` / `--colab` / `--kaggle` 指定硬件或渠道。 |
 | `colab-ultra exec -s demo -p tiles -f job.py` | 把脚本送到云端并在项目 `tiles/code/` 下前台执行、实时回传输出（加 `--timeout` 调长限时）。 |
 | `colab-ultra logs -s demo -n 100` | 读取最近一次 `exec` 日志末尾 100 行与当前心跳任务（`-n 0` 读全文，`--json` 结构化输出，内核 `BUSY` 也可用）。 |
@@ -118,3 +119,4 @@ colab-ultra exec -s demo -p tiles -f recipes/my_infer.py --timeout 7200
 | [SKILL.md](SKILL.md) | 完整命令约定、T4 默认路由规则、Agent 零轮询协作规范与实机踩坑记录 |
 | [references/model-library.md](references/model-library.md) | 共享模型库命名规范、`manifest.json` 结构、`models.ensure()` 用法与迁移指南 |
 | [references/fast-nvme-staging.md](references/fast-nvme-staging.md) | `hf_transfer`（64 并发）与 `aria2`（16 并发）实机基准数据与 NVMe 暂存说明 |
+| [references/hardware-specs.md](references/hardware-specs.md) | Colab 与 Kaggle 硬件规格、量化精度选择和运行时 GPU 查询 |

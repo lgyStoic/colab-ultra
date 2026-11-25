@@ -14,6 +14,7 @@ Run each command separately so the task log shows live progress.
 | `colab-ultra init` | Configure ADC, alerts and the optional VPS sentinel. Sync the shared VM library when local Drive is available. |
 | `colab-ultra sync-remote` | Deploy the current checkout's runtime to `~/ColabUltra/scripts/cu_remote/`. |
 | `colab-ultra status --json` | Read active sessions, task heartbeats, GPU load, Drive status, paid balance and burn rate. |
+| `colab-ultra specs` | Compare hardware, native precisions and peak throughput per CU. See the [hardware specifications](references/hardware-specs.md). |
 | `colab-ultra up -s prep --cpu --std-mem` | Allocate a low-cost CPU worker for preparation. Use `--cpu` for high-memory ETL or `--workers N` for multiple nodes. |
 | `colab-ultra up -s l4 --gpu L4` | Allocate a GPU. T4 can route to Kaggle's free dual-T4 when quota permits. Use `--colab` or `--kaggle` to select a provider. |
 | `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_diffsynth.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |

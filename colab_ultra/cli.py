@@ -3,8 +3,10 @@ import json
 import os
 import subprocess
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from colab_ultra.alerts import send_alert
 from colab_ultra.backends.kaggle import get_kaggle_quota
@@ -21,6 +23,7 @@ from colab_ultra.config import (
 )
 from colab_ultra.drive import detect_local_drive_hub
 from colab_ultra.models_cli import add_models_parser, cmd_models
+from colab_ultra.remote import hardware
 from colab_ultra.session import (
     cmd_down,
     cmd_exec,
@@ -142,6 +145,57 @@ def cmd_init(args):
     render_dashboard(ccu, vms)
 
 
+def cmd_specs(args):
+    """Show the hardware catalog without contacting a backend."""
+    specs = hardware.list_specs(
+        precision=args.precision, min_vram_gb=args.min_vram, kind=args.kind,
+    )
+    if args.json:
+        rows = [hardware.as_dict(spec) for spec in specs]
+        if args.precision is not None:
+            for row, spec in zip(rows, specs):
+                row["selected_precision"] = args.precision
+                row["efficiency_per_cu"] = spec.tflops_per_cu(args.precision)
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    table = Table(
+        box=box.SIMPLE,
+        padding=0,
+        caption="Dense Tensor Core peak. Sparse 2:4 can double throughput on Ampere and newer.",
+    )
+    table.add_column("Key", no_wrap=True)
+    table.add_column("Arch / SM", overflow="fold")
+    table.add_column("VRAM / RAM", justify="right", overflow="fold")
+    for title in ("BW (GB/s)", "FP16", "BF16", "INT8 (TOPS)", "FP8", "NVFP4", "CU/h"):
+        table.add_column(title, justify="right", overflow="fold")
+    if args.precision is not None:
+        table.add_column(f"{args.precision.upper()}/CU", justify="right", overflow="fold")
+
+    for spec in specs:
+        metrics = (
+            spec.fp16_tflops, spec.bf16_tflops, spec.int8_tops, spec.fp8_tflops, spec.nvfp4_tflops,
+        )
+        row = [
+            spec.key,
+            f"{spec.arch} / {spec.sm}" if spec.sm else spec.arch,
+            f"{spec.vram_gb:g} / {spec.ram_gb:g}",
+            f"{spec.bandwidth_gb_s:g}",
+            *(f"{value:g}" if value is not None else "-" for value in metrics),
+            f"{spec.cu_per_hour:g}",
+        ]
+        if args.precision is not None:
+            efficiency = spec.tflops_per_cu(args.precision)
+            if efficiency is not None:
+                row.append(f"{efficiency:.2f}")
+            elif spec.cu_per_hour == 0 and spec.metric_for(args.precision) is not None:
+                row.append("FREE")
+            else:
+                row.append("-")
+        table.add_row(*row)
+    console.print(table)
+
+
 def build_parser():
     """Build the public CLI without contacting a backend."""
     parser = argparse.ArgumentParser(description="Colab Ultra: Agent-First Smart Breaker & 20TB Drive Hub (Colab + Free Kaggle T4x2)")
@@ -217,6 +271,12 @@ def build_parser():
     logs.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra)")
     logs.add_argument("-n", "--lines", type=int, default=100, help="显示最后 N 行，0 表示全部")
     logs.add_argument("--json", action="store_true", help="输出 JSON")
+
+    specs = sub.add_parser("specs", help="查看各硬件规格、BF16/INT8/FP8/NVFP4 算力与性价比")
+    specs.add_argument("--precision", choices=["fp16", "bf16", "int8", "fp8", "nvfp4"], default=None)
+    specs.add_argument("--min-vram", type=float, default=0.0, help="最低显存容量 (GB)")
+    specs.add_argument("--kind", choices=["gpu", "cpu", "tpu"], default=None)
+    specs.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -245,6 +305,8 @@ def main(argv=None):
         cmd_logs(args)
     elif args.cmd == "models":
         cmd_models(args)
+    elif args.cmd == "specs":
+        cmd_specs(args)
     elif args.cmd == "pull":
         cmd_pull(args)
     elif args.cmd == "down":

@@ -14,6 +14,7 @@ OPTIONS = {
     "pull": "-p --project --dest --filename -s --session --json",
     "down": "-s --session --all --no-backup --json", "test-alert": "", "sync-remote": "",
     "models": "", "logs": "-s --session -n --lines --json",
+    "specs": "--precision --min-vram --kind --json",
 }
 
 
@@ -30,6 +31,10 @@ def test_help_parity():
         assert (args.cmd, args.action) == ("models", action)
     logs = parser.parse_args(["logs"])
     assert (logs.session, logs.lines, logs.json) == ("ultra", 100, False)
+    specs = parser.parse_args(["specs"])
+    assert (specs.cmd, specs.precision, specs.min_vram, specs.kind, specs.json) == (
+        "specs", None, 0.0, None, False,
+    )
 
 
 def test_config(tmp_path):
@@ -60,3 +65,4 @@ def test_init_deploys_shared_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "render_dashboard", Mock())
     cli.main(["init"])
     assert (hub / "scripts/cu_remote/stage.py").is_file()
+    assert (hub / "scripts/cu_remote/hardware.py").is_file()
