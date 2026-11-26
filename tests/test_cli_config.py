@@ -16,6 +16,7 @@ OPTIONS = {
     "models": "", "logs": "-s --session -n --lines --json", "queue": "--redis-url",
     "dashboard": "--host --port --project --queues --no-open --redis-url",
     "specs": "--precision --min-vram --kind --json",
+    "ssh": "-s --session -i --identity --proxy-mode",
 }
 
 
@@ -36,6 +37,8 @@ def test_help_parity():
     assert (specs.cmd, specs.precision, specs.min_vram, specs.kind, specs.json) == (
         "specs", None, 0.0, None, False,
     )
+    ssh = parser.parse_args(["ssh", "-s", "l4", "--", "nvidia-smi"])
+    assert (ssh.cmd, ssh.session, ssh.command) == ("ssh", "l4", ["--", "nvidia-smi"])
 
 
 def test_config(tmp_path):

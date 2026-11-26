@@ -32,8 +32,8 @@ def check_compatibility():
     from colab_cli.common import state
 
     installed = version("google-colab-cli")
-    if not installed.startswith("0.7."):
-        raise RuntimeError(f"Review google-colab-cli {installed} compatibility (tested with 0.7.5)")
+    if not installed.startswith(("0.7.", "0.8.")):
+        raise RuntimeError(f"Review google-colab-cli {installed} compatibility (tested with 0.8.0)")
     required = {"code", "allow_stdin", "timeout"}
     if not required.issubset(signature(ColabRuntime.execute_code).parameters):
         raise RuntimeError(f"google-colab-cli {installed}: ColabRuntime.execute_code signature changed")

@@ -19,6 +19,7 @@ Run each command separately so the task log shows live progress.
 | `colab-ultra up -s l4 --gpu L4` | Allocate a GPU. T4 can route to Kaggle's free dual-T4 when quota permits. Use `--colab` or `--kaggle` to select a provider. |
 | `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_infer.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |
 | `colab-ultra logs -s NAME -n 100` | Read the latest exec log, including while the kernel is busy. Use `-n 0` for all lines. |
+| `colab-ultra ssh -s l4 -- "nvidia-smi"` | Run a short non-interactive diagnostic command on an existing Colab runtime without blocking a busy Jupyter kernel (Colab only, not Kaggle). |
 | `colab-ultra models ls` | List local Drive variants, payload sizes and manifest status. |
 | `colab-ultra models verify MODEL/VARIANT` | Check filenames and sizes. Omit the target to check the entire library. |
 | `colab-ultra models rm MODEL/VARIANT` | Preview removal of one variant. Add `--yes` to delete it. |
@@ -40,6 +41,7 @@ Run each command separately so the task log shows live progress.
 - Do not pass `--colab` for T4 jobs unless Kaggle is unavailable or out of quota, multiple workers or high-RAM are needed, or another Kaggle session is already running. Write outputs under `/content/drive/MyDrive/ColabUltra/<project>/runs/` and run via `exec -p <project>` so Kaggle mirrors the project and syncs `runs/` back to `~/ColabUltra/<project>/runs/`; inputs over 80 MB require `init --with-drive-scope` or an HF/URL download.
 - Run `up`, `exec` and `down` with live terminal output. Omit `--json`, pipes such as `| grep`, and shell chains. Use `--json` only on `status` when parsing its output.
 - Never poll `colab-ultra exec` progress with timers or `sleep` loops. Wait for the background command exit notification; only inspect on demand with `colab-ultra logs -s NAME -n 50` or `colab-ultra status --json` if the user asks for progress or the WebSocket disconnects.
+- Use `colab-ultra ssh -s NAME -- "CMD"` only for short, non-interactive diagnostics on Colab runtimes (e.g. `nvidia-smi`, `df -h`, `tail`). Never open an interactive shell without `-- CMD`, never run long jobs over SSH (use `exec` to keep the Jupyter kernel `BUSY`), never poll in a loop (the server caps concurrent SSH sessions with HTTP 429), and never target Kaggle sessions (use `status --json` and `logs` instead).
 - Land multi-connection downloads (default `hf_transfer` c=64, or `aria2c` c=16) on local NVMe under `/content/` first. Then copy sequentially to `/content/drive/MyDrive/` with `cp` or `shutil.copy2`. Reject incomplete transfers and `.aria2` sidecars.
 - Copy Drive-cached binaries into `/tmp` and run `chmod +x` there. Drive FUSE does not preserve the execute bit.
 - Confirm outputs have reached Drive before releasing the session. Use `down -s NAME` for one session. Check all active tasks before using `down --all`.

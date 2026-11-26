@@ -25,7 +25,7 @@
 在仓库根目录执行安装（已有 `~/.local/bin/colab-ultra` 软链可跳过 `ln -s`）：
 
 ```bash
-uv tool install --with requests --with rich --with websocket-client google-colab-cli==0.7.5
+uv tool install --with requests --with rich --with websocket-client google-colab-cli==0.8.0
 mkdir -p ~/.local/bin
 ln -s "$PWD/colab_ultra/breaker.py" ~/.local/bin/colab-ultra
 export PATH="$HOME/.local/bin:$PATH"

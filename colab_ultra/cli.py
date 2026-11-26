@@ -26,6 +26,7 @@ from colab_ultra.drive import detect_local_drive_hub
 from colab_ultra.models_cli import add_models_parser, cmd_models
 from colab_ultra.queue_cli import add_queue_parser, cmd_queue
 from colab_ultra.remote import hardware
+from colab_ultra.ssh_cli import add_ssh_parser, cmd_ssh
 from colab_ultra.session import (
     cmd_down,
     cmd_exec,
@@ -281,6 +282,7 @@ def build_parser():
     specs.add_argument("--min-vram", type=float, default=0.0, help="最低显存容量 (GB)")
     specs.add_argument("--kind", choices=["gpu", "cpu", "tpu"], default=None)
     specs.add_argument("--json", action="store_true", help="输出 JSON")
+    add_ssh_parser(sub)
     return parser
 
 
@@ -315,6 +317,8 @@ def main(argv=None):
         cmd_dashboard(args)
     elif args.cmd == "specs":
         cmd_specs(args)
+    elif args.cmd == "ssh":
+        cmd_ssh(args)
     elif args.cmd == "pull":
         cmd_pull(args)
     elif args.cmd == "down":
