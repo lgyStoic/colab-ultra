@@ -10,8 +10,10 @@
 
 - **算力防空烧与真关机**：持续监控 GPU 功耗、CPU、磁盘 I/O 与任务心跳，低负载自动告警并拉闸，支持独立 VPS 哨兵防本机休眠失联；关机时向云端核验真实释放（含孤儿实例），避免假关机持续扣费。
 - **免费双卡优先与智能路由**：请求普通 T4 时默认优先路由免费 Kaggle 双卡 T4×2，失败自动回退 Colab，并在有免费额度仍手动选付费渠道时给出费率提示。
+- **分布式队列与异构流水线（Redis Streams / Upstash REST）**：通过 `colab-ultra queue` 管理任务队列，支持跨平台分工执行（如免费 Kaggle 双卡 T4×2 并发运行 `embed + vae`，Colab L4 专注运行 `dit`），并配本地实时 Web 看板 `colab-ultra dashboard` 统一查看 GPU 遥测、队列进度与成图画廊。
 - **前台长连接与断连可恢复**：通过 Jupyter WebSocket 前台执行脚本，保持内核持续活跃以规避平台空闲回收；支持网络抖动自动重试，以及断连或内核繁忙时随时回看实时日志。
-- **全局共享模型库与高速暂存**：多项目共用 `ColabUltra/models/` 与清单校验，避免重复下载；大权重优先走高速并发下载落 VM 本地 NVMe 再顺序写盘，Kaggle 容器通过 Drive API 共享同一模型库并自动同步产物。
+- **全局共享模型库、64 路高速暂存与编译缓存**：多项目共用 `ColabUltra/models/` 与清单校验，避免重复下载；Colab 端通过短效 Drive Token 走 64 路并发 Drive HTTP API 拉取模型至本地 NVMe（失败自动回退 FUSE），并将 Triton / Inductor 编译缓存按架构与版本持久化至 Drive（`.cache/`）。
+- **独立推理引擎分层（`engines/`）**：内置纯 PyTorch 推理引擎（如 `engines/h3_infer/`，含 cuBLASLt INT8-ConvRot 与 Triton 反量化算子，零 DiffSynth 依赖），与调度底座解耦并随 `sync-remote` 自动分发，便于后续扩展 Qwen 等模型。
 - **原生适配 AI Agent 协作**：长任务结束或出错即自动唤醒调用方（无需轮询），提供结构化 JSON 状态与日志输出，并支持本地零算力 `--dry-run` 预检。
 
 ---
@@ -39,6 +41,15 @@ colab-ultra logs -s demo -n 20
 colab-ultra down -s demo
 ```
 
+使用分布式队列与本地实时看板时，将 `redis_url` 配入 `~/.config/colab-ultra/config.json`（或通过 `COLAB_ULTRA_REDIS_URL` / `--redis-url` 传入标准 Redis/Rediss 或 Upstash REST 地址）：
+
+```bash
+colab-ultra queue ping
+colab-ultra queue push h3_pipe_embed --file ~/ColabUltra/<项目>/code/prompts.json
+colab-ultra queue status h3_pipe_embed
+colab-ultra dashboard --project <项目>
+```
+
 > 完整子命令与参数说明以 CLI 实时帮助为准，运行 `colab-ultra --help` 或 `colab-ultra <子命令> --help` 查看；完整命令约定与 Agent 协作规范见 [SKILL.md](SKILL.md)。
 
 ---
@@ -50,7 +61,10 @@ colab-ultra down -s demo
 ```text
 ~/ColabUltra/
 ├── models/                    所有项目共用的全局模型库（按 <模型>/<量化版本>/ 与 manifest.json 组织）
-├── scripts/cu_remote/         VM 上直接 import 的共享运行库
+├── .cache/                    按 GPU 架构与 PyTorch/Triton 版本隔离的编译缓存
+├── scripts/
+│   ├── cu_remote/             VM 上直接 import 的共享运行库
+│   └── h3_infer/              由 `sync-remote` 自动同步的推理引擎包
 └── <项目>/
     ├── code/                  任务脚本与配置
     ├── data/                  输入数据
@@ -63,8 +77,9 @@ colab-ultra down -s demo
 
 | 路径 / 文档 | 说明 |
 | --- | --- |
-| `colab_ultra/` | 本机 CLI、调度与生命周期管理，以及 VM 共享运行库源码（`remote/`） |
-| `recipes/` | 开箱即用的推理/任务配方与自定义模板，接入方式见 [recipes/README.md](recipes/README.md) |
+| `colab_ultra/` | 本机 CLI、调度与生命周期管理、Redis 队列（`queue_cli.py`）、Web 看板（`dashboard.py`）及 VM 共享运行库（`remote/`） |
+| `engines/` | 纯 PyTorch 模型推理引擎目录（如 `engines/h3_infer/`），与调度底座解耦、便于扩展新模型 |
+| `recipes/` | 异构流水线 Worker（`h3_pipeline_worker.py`）、单机推理配方（`minimax_h3_infer.py`）与自定义模板，详见 [recipes/README.md](recipes/README.md) |
 | `workflows/` & `tools/` | 环境自检、初始化与模型迁移等辅助脚本 |
 | [SKILL.md](SKILL.md) | 完整命令约定、硬件路由规则、Agent 零轮询协作规范与实机踩坑记录 |
-| [references/](references/) | 专题参考文档目录（硬件规格与算力选型、共享模型库规范、高速下载与 NVMe 暂存基准等） |
+| [references/](references/) | 专题参考文档目录（硬件规格、H3 实测基准 [h3-infer-benchmarks.md](references/h3-infer-benchmarks.md)、共享模型库规范、NVMe 暂存基准等） |
