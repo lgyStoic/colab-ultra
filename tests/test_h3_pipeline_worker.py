@@ -1153,7 +1153,8 @@ def test_worker_discovers_bundled_h3_library(monkeypatch):
     assert sys.path[0] == engines_root
 
 
-def test_kaggle_pulls_synced_h3_library_when_missing(monkeypatch, tmp_path):
+@pytest.mark.parametrize("concurrent_install", [False, True])
+def test_kaggle_pulls_synced_h3_library_when_missing(monkeypatch, tmp_path, concurrent_install):
     scripts = tmp_path / "scripts"
     monkeypatch.setattr(worker, "REMOTE_SCRIPTS", scripts)
     monkeypatch.delattr(worker, "__file__")
@@ -1179,10 +1180,22 @@ def test_kaggle_pulls_synced_h3_library_when_missing(monkeypatch, tmp_path):
 
     http = Mock(side_effect=request)
     monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(request=http))
+    if concurrent_install:
+        def replace_with_concurrent_install(package, target):
+            assert target == scripts / "h3_infer"
+            assert (package / "__init__.py").read_bytes() == b"pass"
+            target.mkdir()
+            (target / "__init__.py").write_bytes(b"# concurrent worker")
+            raise OSError("Directory not empty")
+
+        monkeypatch.setattr(Path, "replace", replace_with_concurrent_install)
+
     worker._ensure_h3_import_path()
     assert str(scripts) in sys.path
-    for relative in ("__init__.py", "models/__init__.py"):
-        assert (scripts / "h3_infer" / relative).read_bytes() == b"pass"
+    init = scripts / "h3_infer" / "__init__.py"
+    assert init.read_bytes() == (b"# concurrent worker" if concurrent_install else b"pass")
+    if not concurrent_install:
+        assert (scripts / "h3_infer" / "models" / "__init__.py").read_bytes() == b"pass"
     assert any(entry.kwargs["params"].get("pageToken") == "more" for entry in http.call_args_list)
 
 
@@ -1309,9 +1322,14 @@ def test_embed_vae_launch_order_and_environment(monkeypatch, tmp_path, gpu_count
 
     embed.poll.side_effect = embed_poll
 
+    monkeypatch.setenv("COLAB_ULTRA_KAGGLE", "1")
+    ensure_h3_import_path = Mock()
+    monkeypatch.setattr(worker, "_ensure_h3_import_path", ensure_h3_import_path)
+
     def spawn(args, *, env):
         stage.assert_called_once()
         count.assert_called_once_with()
+        ensure_h3_import_path.assert_called_once_with()
         assert os.environ.get("CUDA_VISIBLE_DEVICES") == mask
         suffix = args[6].removeprefix("kaggle-")
         if suffix == "embed":

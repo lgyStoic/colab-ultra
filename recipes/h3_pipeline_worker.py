@@ -1002,7 +1002,11 @@ def _ensure_h3_import_path():
                 drive.download_python_tree(parent, package)
                 if not _nonempty_file(package / "__init__.py"):
                     raise FileNotFoundError("h3_infer/__init__.py")
-                package.replace(REMOTE_SCRIPTS / "h3_infer")
+                try:
+                    package.replace(REMOTE_SCRIPTS / "h3_infer")
+                except OSError:
+                    if not _nonempty_file(REMOTE_SCRIPTS / "h3_infer" / "__init__.py"):
+                        raise
         except (OSError, ValueError, KeyError) as exc:
             raise RuntimeError(f"Could not load the Drive h3_infer library ({type(exc).__name__}). "
                                "Run colab-ultra sync-remote with h3_infer available.") from None
@@ -1391,6 +1395,9 @@ def _worker_script_path(code):
 
 def _launch_embed_vae(script, code, worker_id, redis_url, model_root):
     import torch
+
+    if os.environ.get("COLAB_ULTRA_KAGGLE") == "1":
+        _ensure_h3_import_path()
 
     env = {**os.environ, "COLAB_ULTRA_REDIS_URL": redis_url, "COLAB_ULTRA_STAGED_MODELS": str(model_root)}
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(code), env.get("PYTHONPATH"))))
