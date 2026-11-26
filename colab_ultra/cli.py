@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from colab_ultra import get_version_string
 from colab_ultra.alerts import send_alert
 from colab_ultra.backends.kaggle import get_kaggle_quota
 from colab_ultra.breaker import watch_loop
@@ -199,9 +200,21 @@ def cmd_specs(args):
     console.print(table)
 
 
+class _VersionAction(argparse.Action):
+    """Print version + git short hash only when -V/--version is requested."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help="显示版本号"):
+        super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(get_version_string())
+        parser.exit()
+
+
 def build_parser():
     """Build the public CLI without contacting a backend."""
     parser = argparse.ArgumentParser(description="Colab Ultra: Agent-First Smart Breaker & 20TB Drive Hub (Colab + Free Kaggle T4x2)")
+    parser.add_argument("-V", "--version", action=_VersionAction)
     sub = parser.add_subparsers(dest="cmd")
 
     # init

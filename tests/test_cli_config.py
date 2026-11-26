@@ -70,3 +70,16 @@ def test_init_deploys_shared_runtime(tmp_path, monkeypatch):
     cli.main(["init"])
     assert (hub / "scripts/cu_remote/stage.py").is_file()
     assert (hub / "scripts/cu_remote/hardware.py").is_file()
+
+
+def test_version_flag(capsys):
+    import re
+    import pytest
+    import colab_ultra
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", colab_ultra.__version__)
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out.strip()
+    assert f"colab-ultra {colab_ultra.__version__}" in out
