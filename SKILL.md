@@ -17,7 +17,7 @@ Run each command separately so the task log shows live progress.
 | `colab-ultra specs` | Compare hardware, native precisions and peak throughput per CU. See the [hardware specifications](references/hardware-specs.md). |
 | `colab-ultra up -s prep --cpu --std-mem` | Allocate a low-cost CPU worker for preparation. Use `--cpu` for high-memory ETL or `--workers N` for multiple nodes. |
 | `colab-ultra up -s l4 --gpu L4` | Allocate a GPU. T4 can route to Kaggle's free dual-T4 when quota permits. Use `--colab` or `--kaggle` to select a provider. |
-| `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_diffsynth.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |
+| `colab-ultra exec -s l4 -p tiles -f recipes/minimax_h3_infer.py --timeout 7200` | Run the local script in the project's remote `code/` directory and stream output. |
 | `colab-ultra logs -s NAME -n 100` | Read the latest exec log, including while the kernel is busy. Use `-n 0` for all lines. |
 | `colab-ultra models ls` | List local Drive variants, payload sizes and manifest status. |
 | `colab-ultra models verify MODEL/VARIANT` | Check filenames and sizes. Omit the target to check the entire library. |

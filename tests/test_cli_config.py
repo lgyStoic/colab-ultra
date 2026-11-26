@@ -13,7 +13,8 @@ OPTIONS = {
     "exec": "-s --session -p --project -f --file --timeout --restart-kernel --json",
     "pull": "-p --project --dest --filename -s --session --json",
     "down": "-s --session --all --no-backup --json", "test-alert": "", "sync-remote": "",
-    "models": "", "logs": "-s --session -n --lines --json",
+    "models": "", "logs": "-s --session -n --lines --json", "queue": "--redis-url",
+    "dashboard": "--host --port --project --queues --no-open --redis-url",
     "specs": "--precision --min-vram --kind --json",
 }
 

@@ -443,7 +443,25 @@ def _cu_capture_log(task):
 """
 
 
-def _job_source(user_code, script_label, task_label, prelude, pack=False):
+def _load_local_hf_token() -> str | None:
+    """Return a local Hugging Face token from $HF_TOKEN or standard CLI token files."""
+    env_tok = os.environ.get("HF_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    for path in (
+        Path.home() / ".cache" / "huggingface" / "token",
+        Path.home() / ".huggingface" / "token",
+    ):
+        try:
+            tok = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if tok:
+            return tok
+    return None
+
+
+def _job_source(user_code, script_label, task_label, prelude, pack=False, hf_token=None, drive_token=None):
     """Wrap a script with a last-exec log, heartbeat and optional Kaggle sync."""
     aliases = """_scripts = "/content/drive/MyDrive/ColabUltra/scripts"
 if os.path.isfile(os.path.join(_scripts, "cu_remote", "__init__.py")):
@@ -478,8 +496,16 @@ def _hb_loop():
             pass
         _hb_stop.wait(15)
 with _cu_capture_log({task_label!r}):
+    _cu_injected_hf = False
+    _cu_injected_drive = False
     try:
 {indent(bootstrap, "        ")}
+        if {hf_token!r} and "HF_TOKEN" not in os.environ:
+            os.environ["HF_TOKEN"] = {hf_token!r}
+            _cu_injected_hf = True
+        if {drive_token!r} and "DRIVE_ACCESS_TOKEN" not in os.environ:
+            os.environ["DRIVE_ACCESS_TOKEN"] = {drive_token!r}
+            _cu_injected_drive = True
         _hb_thread = threading.Thread(target=_hb_loop, daemon=True)
         _hb_thread.start()
         try:
@@ -494,6 +520,10 @@ with _cu_capture_log({task_label!r}):
                 if os.path.exists(_hb_file):
                     os.remove(_hb_file)
     finally:
+        if _cu_injected_hf:
+            os.environ.pop("HF_TOKEN", None)
+        if _cu_injected_drive:
+            os.environ.pop("DRIVE_ACCESS_TOKEN", None)
         if {pack!r}:
             os.environ.pop("DRIVE_ACCESS_TOKEN", None)
             globals().pop("_cu_drive_tok", None)
@@ -506,6 +536,7 @@ def cmd_exec(args):
     timeout_sec = str(getattr(args, "timeout", 3600.0) or 3600.0)
     user_code, script_label = _resolve_exec_source(args, project_name)
     task_label = f"{project_name}/{script_label}" if project_name else script_label
+    hf_token = _load_local_hf_token()
     proj_prelude = ""
     if project_name:
         proj_prelude = (
@@ -551,7 +582,9 @@ def cmd_exec(args):
             "    try: sys.modules['torch'].cuda.empty_cache()\n"
             "    except Exception: pass\n"
         ) + proj_prelude + kaggle_runtime_code() + kaggle_sync_defs
-        wrapped_kaggle_code = _job_source(user_code, script_label, task_label, prelude, pack=True)
+        wrapped_kaggle_code = _job_source(
+            user_code, script_label, task_label, prelude, pack=True, hf_token=hf_token,
+        )
 
         proj_local_dir = os.path.join(local_hub, project_name) if (local_hub and project_name) else None
 
@@ -574,7 +607,10 @@ def cmd_exec(args):
         _exec_result(args, t0, ret_code, out_str, err_str)
         return
 
-    wrapped_code = _job_source(user_code, script_label, task_label, proj_prelude)
+    drive_tok = get_short_lived_drive_token()
+    wrapped_code = _job_source(
+        user_code, script_label, task_label, proj_prelude, hf_token=hf_token, drive_token=drive_tok,
+    )
     t0 = time.time()
     ret_code, out_str, err_str = run_detached(args, wrapped_code)
     _exec_result(args, t0, ret_code, out_str, err_str)

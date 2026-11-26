@@ -344,3 +344,75 @@ def test_missing_kaggle_log_checks_session(monkeypatch, url, active, capsys):
         with pytest.raises(SystemExit, match="no proxy URL" if active else "Lost Kaggle session"):
             cli.main(["logs"])
     check.assert_called_once_with(vm)
+
+
+def test_load_local_hf_token_precedence(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert session._load_local_hf_token() is None
+
+    legacy = tmp_path / ".huggingface/token"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("  hf_legacy_tok \n", encoding="utf-8")
+    assert session._load_local_hf_token() == "hf_legacy_tok"
+
+    cache = tmp_path / ".cache/huggingface/token"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("   \n", encoding="utf-8")
+    assert session._load_local_hf_token() == "hf_legacy_tok"
+
+    cache.write_text("hf_cache_tok\n", encoding="utf-8")
+    assert session._load_local_hf_token() == "hf_cache_tok"
+
+    monkeypatch.setenv("HF_TOKEN", " hf_env_tok ")
+    assert session._load_local_hf_token() == "hf_env_tok"
+
+
+@pytest.mark.parametrize("hf_token,existing,fails", [
+    ("hf_injected", None, False),
+    ("hf_injected", None, True),
+    ("hf_injected", "hf_existing", False),
+    ("hf_injected", "hf_existing", True),
+    (None, None, False),
+    (None, "hf_existing", False),
+])
+def test_job_source_hf_token_injection_and_cleanup(monkeypatch, local_job, hf_token, existing, fails):
+    if existing is None:
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("HF_TOKEN", existing)
+    expected = existing if existing is not None else hf_token
+    code = f'assert os.environ.get("HF_TOKEN") == {expected!r}'
+    if fails:
+        code += '\nraise RuntimeError("boom")'
+    source = session._job_source(code, "hf.py", "demo/hf.py", "", hf_token=hf_token)
+    if fails:
+        with pytest.raises(RuntimeError, match="boom"):
+            local_job(source)
+    else:
+        local_job(source)
+    assert os.environ.get("HF_TOKEN") == existing
+
+
+@pytest.mark.parametrize("provider", ["kaggle", "colab"])
+def test_cmd_exec_forwards_local_hf_token(tmp_path, monkeypatch, local_job, provider):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    tok_file = tmp_path / ".cache/huggingface/token"
+    tok_file.parent.mkdir(parents=True)
+    tok_file.write_text("hf_test_cached", encoding="utf-8")
+
+    monkeypatch.setattr(session, "get_short_lived_drive_token", lambda: None)
+    if provider == "kaggle":
+        monkeypatch.setattr(session, "_load_kaggle_sessions", lambda: {"ultra": {"proxy_url": "url"}})
+        monkeypatch.setattr(session, "assignments", lambda: [])
+        monkeypatch.setattr(session, "kaggle_active", lambda sess: True)
+        monkeypatch.setattr(session, "detect_local_drive_hub", lambda: None)
+        monkeypatch.setattr(session, "kaggle_runtime_code", lambda: "")
+        monkeypatch.setattr(session, "jupyter_exec_ws", lambda url, code, **kw: (local_job(code), "", "")[1:] and (0, "", ""))
+    else:
+        monkeypatch.setattr(session, "_load_kaggle_sessions", lambda: {})
+        monkeypatch.setattr(session, "run_detached", lambda args, code: (local_job(code) or (0, "", "")))
+
+    cli.main(["exec", 'assert os.environ["HF_TOKEN"] == "hf_test_cached"'])
+    assert "HF_TOKEN" not in os.environ

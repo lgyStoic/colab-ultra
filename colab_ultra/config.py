@@ -16,6 +16,7 @@ CONFIG_PATH = os.path.expanduser(
 LOG_DIR = os.path.join(os.path.dirname(CONFIG_PATH), "logs")
 
 DEFAULT_CONFIG = {
+    "redis_url": "",
     "poll_interval_sec": 15,
     "gpu_min_util_pct": 5.0,
     "cpu_min_util_pct": 55.0,

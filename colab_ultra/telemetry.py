@@ -25,7 +25,7 @@ from colab_ultra.config import (
     PROBE_LOCAL_PATH,
     load_config,
 )
-from colab_ultra.drive import detect_local_drive_hub
+from colab_ultra.drive import detect_local_drive_hub, get_drive_storage_quota
 from colab_ultra.retry import retry
 
 console = Console()
@@ -128,6 +128,18 @@ def inspect_all_vms():
         vms.extend(kaggle_vms)
     except Exception:
         pass
+
+    mounted_colab_drives = []
+    for vm in vms:
+        drive = vm.get("telemetry", {}).get("drive", {})
+        if vm.get("provider") == "colab" and drive.get("mounted") and drive.get("mode", "fuse") != "kaggle_synced":
+            mounted_colab_drives.append(drive)
+    if mounted_colab_drives:
+        quota = get_drive_storage_quota()
+        if quota is not None:
+            capacity = {k: quota[k] for k in ("total_tb", "used_tb", "free_tb")}
+            for drive in mounted_colab_drives:
+                drive.update(capacity)
 
     return ccu, vms
 

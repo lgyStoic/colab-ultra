@@ -116,14 +116,26 @@ def _download(item, temp):
         return
     url = item.source
     headers = {}
-    expected = None
     if Path(url).is_relative_to(DRIVE):
-        headers["Authorization"] = "Bearer " + os.environ["DRIVE_ACCESS_TOKEN"]
-        url, expected = _drive_media(url, headers)
-    elif urlsplit(url).hostname == "huggingface.co":
+        try:
+            headers["Authorization"] = "Bearer " + os.environ["DRIVE_ACCESS_TOKEN"]
+            url, expected = _drive_media(url, headers)
+            _download_url(item, temp, url, headers, expected)
+        except Exception:
+            if os.environ.get("COLAB_ULTRA_KAGGLE") == "1" or not valid(item.source, item.min_bytes):
+                raise
+            temp.unlink(missing_ok=True)
+            Path(f"{temp}.aria2").unlink(missing_ok=True)
+            shutil.copy2(item.source, temp)
+        return
+    if urlsplit(url).hostname == "huggingface.co":
         token = os.environ.get("HF_TOKEN")
         if token:
             headers["Authorization"] = "Bearer " + token
+    _download_url(item, temp, url, headers)
+
+
+def _download_url(item, temp, url, headers, expected=None):
     if item.backend == "aria2":
         ensure_aria2()
         count = str(item.concurrency)

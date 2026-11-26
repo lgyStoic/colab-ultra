@@ -43,13 +43,16 @@ def setup_drive_hub():
             print(f"❌ 自动挂载需要授权，请先在本地运行: colab drivemount -s <会话名> ({e})")
             return False
 
-    st = os.statvfs(DRIVE_MOUNT)
-    total_tb = (st.f_blocks * st.f_frsize) / (1024 ** 4)
-    free_tb = (st.f_bavail * st.f_frsize) / (1024 ** 4)
-    used_tb = total_tb - free_tb
-
     print(f"✅ Google Drive 挂载就绪！")
-    print(f"📦 云盘总容量: {total_tb:.2f} TB | 已用: {used_tb:.2f} TB | 剩余可用: {free_tb:.2f} TB")
+    quota = globals().get("_CU_DRIVE_QUOTA")
+    if isinstance(quota, dict) and all(k in quota for k in ("total_tb", "used_tb", "free_tb")):
+        print(f"📦 云盘总容量: {float(quota['total_tb']):.2f} TB | 已用: {float(quota['used_tb']):.2f} TB | 剩余可用: {float(quota['free_tb']):.2f} TB")
+    else:
+        st = os.statvfs(DRIVE_MOUNT)
+        total_tb = (st.f_blocks * st.f_frsize) / (1024 ** 4)
+        free_tb = (st.f_bavail * st.f_frsize) / (1024 ** 4)
+        used_tb = total_tb - free_tb
+        print(f"📦 云盘本地缓存区: {total_tb:.2f} TB | 已用: {used_tb:.2f} TB | 剩余可用: {free_tb:.2f} TB（未获取云端配额，此为 Colab 本地挂载缓存分区）")
     print("-" * 60)
 
     for sub in DIRS:
@@ -118,4 +121,7 @@ def setup_drive_hub():
 
 
 if __name__ == "__main__":
-    setup_drive_hub()
+    try:
+        setup_drive_hub()
+    finally:
+        globals().pop("_CU_DRIVE_QUOTA", None)

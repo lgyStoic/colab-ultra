@@ -1,5 +1,6 @@
 """Deploy the VM library and generate source for a remote pull."""
 import filecmp
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,9 +13,14 @@ from .remote import models
 RUNTIME = Path(__file__).parent / "remote"
 
 
+def _python_files(source: Path):
+    return sorted(p for p in source.rglob("*.py") if p.is_file() and not p.name.startswith("._")
+                  and "__pycache__" not in p.relative_to(source).parts)
+
+
 def runtime_files():
     """Select exactly the Python sources needed by a VM."""
-    return sorted(p for p in RUNTIME.rglob("*.py") if not p.name.startswith("._") and "__pycache__" not in p.parts)
+    return _python_files(RUNTIME)
 
 
 def kaggle_runtime_code():
@@ -31,31 +37,43 @@ for _name, _content in {sources!r}.items():
 """
 
 
-def sync_remote(hub=None):
-    """Publish and verify the library before retiring either legacy script."""
-    source = RUNTIME
-    scripts = scripts_target(hub)
-    target = scripts / "cu_remote"
+def _sync_python_tree(source: Path, target: Path, temp_parent: Path, *, prune_stale: bool = False):
+    """Publish Python sources atomically and verify them before pruning."""
     target.mkdir(parents=True, exist_ok=True)
-    files = runtime_files()
-    required = {"__init__.py", "stage.py", "vram_policy.py", "models.py"}
-    if not required.issubset(p.relative_to(source).as_posix() for p in files):
-        raise FileNotFoundError(f"Incomplete runtime in {source}")
-    with tempfile.TemporaryDirectory(dir=scripts) as temp:
-        for src in files:
-            dest = target / src.relative_to(source)
+    files = {p.relative_to(source): p for p in _python_files(source)}
+    with tempfile.TemporaryDirectory(dir=temp_parent) as temp:
+        staged = Path(temp) / "source.py"
+        for rel, src in files.items():
+            dest = target / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists() and filecmp.cmp(src, dest, shallow=False):
                 continue
-            staged = Path(temp) / src.name
             shutil.copyfile(src, staged)
             staged.replace(dest)
-    for src in files:
-        dest = target / src.relative_to(source)
+    for rel, src in files.items():
+        dest = target / rel
         if not filecmp.cmp(src, dest, shallow=False):
             raise IOError(f"Drive sync verification failed: {dest}")
+    if prune_stale:
+        for dest in target.rglob("*.py"):
+            if (dest.is_file() or dest.is_symlink()) and dest.relative_to(target) not in files:
+                dest.unlink(missing_ok=True)
+
+
+def sync_remote(hub=None):
+    """Publish and verify the runtime and the optional standalone H3 library."""
+    scripts = scripts_target(hub)
+    target = scripts / "cu_remote"
+    required = {"__init__.py", "stage.py", "vram_policy.py", "models.py"}
+    if not required.issubset(p.relative_to(RUNTIME).as_posix() for p in runtime_files()):
+        raise FileNotFoundError(f"Incomplete runtime in {RUNTIME}")
+    _sync_python_tree(RUNTIME, target, scripts)
     for name in ("fast_stage_nvme.py", "vram_policy.py"):
         (scripts / name).unlink(missing_ok=True)
+    env = os.environ.get("H3_INFER_SOURCE")
+    h3_source = Path(env) if env else Path(__file__).resolve().parents[1] / "engines" / "h3_infer"
+    if h3_source.is_dir() and (h3_source / "__init__.py").is_file():
+        _sync_python_tree(h3_source, scripts / "h3_infer", scripts, prune_stale=True)
     return target
 
 

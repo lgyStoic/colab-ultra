@@ -1,12 +1,65 @@
 import json
 import os
 import sys
+import time
+from threading import Lock
+
+import requests
 
 from colab_cli.runtime import ColabRuntime
 from colab_ultra.backends.colab import colab_state
 from colab_ultra.backends.jupyter import jupyter_exec_ws
 from colab_ultra.compat.colab_cli_patch import patch_kernel_client
 from colab_ultra.retry import retry
+
+
+_DRIVE_QUOTA_TTL = 60
+_drive_quota_lock = Lock()
+_drive_quota_cache = {"expires_at": float("-inf"), "quota": None}
+
+
+def _fetch_drive_storage_quota() -> dict | None:
+    try:
+        from colab_ultra.backends.kaggle import get_short_lived_drive_token
+
+        token = get_short_lived_drive_token()
+        if not token:
+            return None
+        response = requests.get(
+            "https://www.googleapis.com/drive/v3/about?fields=storageQuota",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        storage_quota = data.get("storageQuota") or {}
+        limit = int(storage_quota.get("limit") or 0)
+        usage = int(storage_quota.get("usage") or 0)
+        if limit <= 0:
+            return None
+    except Exception:
+        return None
+
+    tb = 1024 ** 4
+    free_bytes = max(0, limit - usage)
+    return {
+        "total_bytes": limit,
+        "used_bytes": usage,
+        "free_bytes": free_bytes,
+        "total_tb": round(limit / tb, 2),
+        "used_tb": round(usage / tb, 2),
+        "free_tb": round(free_bytes / tb, 2),
+    }
+
+
+def get_drive_storage_quota(*, force_refresh: bool = False) -> dict | None:
+    """Return the account's Drive cloud quota, cached in process for 60 seconds."""
+    with _drive_quota_lock:
+        if force_refresh or time.monotonic() >= _drive_quota_cache["expires_at"]:
+            quota = _fetch_drive_storage_quota()
+            _drive_quota_cache.update(expires_at=time.monotonic() + _DRIVE_QUOTA_TTL, quota=quota)
+        quota = _drive_quota_cache["quota"]
+        return quota.copy() if quota is not None else None
 
 
 def detect_local_drive_hub(*, create=True) -> str | None:
@@ -116,8 +169,6 @@ def initialize_drive(colab_bin, name, quiet=False):
     """Initialize the hub and disambiguate a hung execution channel from a failed mount."""
     from pathlib import Path
 
-    import requests
-
     from colab_ultra.backends.colab import resolve_proxy
     from colab_ultra.backends.jupyter import jupyter_headers
     from colab_ultra.config import BASE_DIR
@@ -126,6 +177,10 @@ def initialize_drive(colab_bin, name, quiet=False):
     mount_drive(name)
     script = os.path.join(BASE_DIR, "workflows", "init_20tb_drive.py")
     code = Path(script).read_text(encoding="utf-8")
+    quota = get_drive_storage_quota()
+    if quota is not None:
+        payload = {k: quota[k] for k in ("total_tb", "used_tb", "free_tb")}
+        code = f"_CU_DRIVE_QUOTA = {payload!r}\n" + code
     url, token = resolve_proxy(name)
     caught = None
     rc = 0

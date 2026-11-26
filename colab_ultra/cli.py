@@ -21,8 +21,10 @@ from colab_ultra.config import (
     load_config,
     save_config,
 )
+from colab_ultra.dashboard import add_dashboard_parser, cmd_dashboard
 from colab_ultra.drive import detect_local_drive_hub
 from colab_ultra.models_cli import add_models_parser, cmd_models
+from colab_ultra.queue_cli import add_queue_parser, cmd_queue
 from colab_ultra.remote import hardware
 from colab_ultra.session import (
     cmd_down,
@@ -267,6 +269,8 @@ def build_parser():
 
     sub.add_parser("sync-remote", help="同步 cu_remote 运行库到本地 Google Drive")
     add_models_parser(sub)
+    add_queue_parser(sub)
+    add_dashboard_parser(sub)
     logs = sub.add_parser("logs", help="读取会话最近一次 exec 的远端日志")
     logs.add_argument("-s", "--session", default="ultra", help="会话名称 (默认 ultra)")
     logs.add_argument("-n", "--lines", type=int, default=100, help="显示最后 N 行，0 表示全部")
@@ -305,6 +309,10 @@ def main(argv=None):
         cmd_logs(args)
     elif args.cmd == "models":
         cmd_models(args)
+    elif args.cmd == "queue":
+        cmd_queue(args)
+    elif args.cmd == "dashboard":
+        cmd_dashboard(args)
     elif args.cmd == "specs":
         cmd_specs(args)
     elif args.cmd == "pull":
